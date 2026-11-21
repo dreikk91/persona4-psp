@@ -7,6 +7,9 @@ typedef struct {
     } u;
 } P4UiVertex;
 extern int p4_ui_font, p4_ui_sprite;
+extern int p4_ui_native;
+void p4_ui_raster(void *raster);
+void p4_ui_sprite_state(void *raster, unsigned flags, int set_states);
 int p4_ui_quad_draw(const P4UiVertex *vertices);
 static inline void p4_ui_colour(P4UiVertex *v, unsigned char r, unsigned char g,
                                 unsigned char b, unsigned char a)

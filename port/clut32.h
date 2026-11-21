@@ -12,10 +12,99 @@
    a texel); its 1 KB palette is larger than such a texture. 256 slots found by a hash of the raster and at most
    CLUT32_PROBE probes, so a bind does not walk every slot. */
 int p4_clut32 = 1, p4_clut32_build = 1, p4_clut32_min = 0;
+#include "paths.h"
+int p4_clut_pack = 0;
 enum { CLUT32_SLOTS = 256, CLUT32_PROBE = 8 };
 typedef struct { const Raster *of; const unsigned char *pixels; Raster copy; } Clut32;
 static Clut32 *clut32_slots; /* heap: .bss must end below the data image */
 static unsigned clut32_binds, clut32_made, clut32_full, clut32_stale, clut32_ms;
+
+typedef struct { unsigned hash, check, w, h, offset; } ClutPackEntry;
+static ClutPackEntry *clut_pack_index;
+static unsigned clut_pack_count, clut_pack_start;
+static int clut_pack_tried;
+
+static void clut32_install(const Raster *r, Clut32 *slot, int depth, unsigned char *indices, unsigned char *palette)
+{
+    Raster copy = *r;
+    copy.depth = depth;
+    copy.stride = (r->width * depth + 7) / 8;
+    copy.originalPixels = copy.cpPixels = indices;
+    copy.palette = palette;
+    sceKernelDcacheWritebackRange(palette, 4 << depth);
+    swizzle_to_arena = 1;
+    swizzle_raster(&copy);
+    swizzle_to_arena = 0;
+    if (!swizzle_head(copy.originalPixels))
+        sceKernelDcacheWritebackRange(copy.originalPixels, copy.stride * copy.height);
+    slot->of = r, slot->pixels = r->originalPixels, slot->copy = copy;
+}
+
+static int clut_pack_read(const Raster *r, const unsigned char *rows, Clut32 *slot)
+{
+    if (!clut_pack_tried) {
+        clut_pack_tried = 1;
+        unsigned head[4];
+        SceUID fd = sceIoOpen(p4_path("p4clut.bin"), PSP_O_RDONLY, 0);
+        if (fd >= 0) {
+            if (sceIoRead(fd, head, sizeof head) == sizeof head && head[0] == 0x4c433450 && head[1] == 2 &&
+                head[2] <= 65536 && head[3] == 16 + head[2] * sizeof(ClutPackEntry)) {
+                int bytes = head[2] * sizeof(ClutPackEntry);
+                clut_pack_index = p4a_malloc(bytes);
+                if (clut_pack_index && sceIoRead(fd, clut_pack_index, bytes) == bytes)
+                    clut_pack_count = head[2], clut_pack_start = head[3];
+                else
+                    p4a_free(clut_pack_index), clut_pack_index = 0;
+            }
+            sceIoClose(fd);
+        }
+        p4_log("clut pack: %u entries\n", clut_pack_count);
+    }
+    if (!clut_pack_count)
+        return 0;
+    unsigned hash = 2166136261u, check = 5381;
+    for (int y = 0; y < r->height; y++)
+        for (int x = 0; x < r->width * 4; x++) {
+            unsigned byte = rows[y * r->stride + x];
+            hash = (hash ^ byte) * 16777619u;
+            check = (check * 33) ^ byte;
+        }
+    unsigned lo = 0, hi = clut_pack_count;
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        if (clut_pack_index[mid].hash < hash)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    for (; lo < clut_pack_count && clut_pack_index[lo].hash == hash; lo++) {
+        const ClutPackEntry *e = clut_pack_index + lo;
+        if (e->check != check || e->w != r->width || e->h != r->height || e->offset < clut_pack_start || e->offset > 0x7ff00000u)
+            continue;
+        SceUID fd = sceIoOpen(p4_path("p4clut.bin"), PSP_O_RDONLY, 0);
+        if (fd < 0)
+            return 0;
+        unsigned depth = 0;
+        unsigned char *indices = 0, *palette = 0;
+        int ok = sceIoLseek32(fd, e->offset, PSP_SEEK_SET) == (int)e->offset &&
+            sceIoRead(fd, &depth, sizeof depth) == sizeof depth && (depth == 8 || (depth == 4 && !(r->width & 1)));
+        if (ok) {
+            int n = r->width * r->height * depth / 8, p = 4 << depth;
+            indices = p4a_memalign(64, n);
+            palette = p4a_memalign(64, p);
+            ok = indices && palette && sceIoRead(fd, palette, p) == p && sceIoRead(fd, indices, n) == n;
+        }
+        sceIoClose(fd);
+        if (ok) {
+            clut32_install(r, slot, depth, indices, palette);
+            p4_log("clut pack hit %dx%d T%u\n", r->width, r->height, depth);
+            return 1;
+        }
+        p4a_free(indices), p4a_free(palette);
+        return 0;
+    }
+    return 0;
+}
 
 static void clut32_free_copy(Clut32 *s)
 {
@@ -33,9 +122,11 @@ static unsigned clut32_release_all(void)
     unsigned bytes = 0;
     for (int i = 0; clut32_slots && i < CLUT32_SLOTS; i++)
         if (clut32_slots[i].of) {
-            bytes += clut32_slots[i].copy.width * clut32_slots[i].copy.height + 1024;
-            if (clut32_slots[i].copy.originalPixels)
+            const Raster *copy = &clut32_slots[i].copy;
+            if (copy->originalPixels) {
+                bytes += copy->stride * copy->height + (4 << copy->depth);
                 clut32_free_copy(&clut32_slots[i]);
+            }
         }
     return bytes;
 }
@@ -160,15 +251,7 @@ static void clut32_make(const Raster *r, const unsigned char *rows, Clut32 *slot
         palette[b] = (sum[0] + m / 2) / m | (sum[1] + m / 2) / m << 8 | (sum[2] + m / 2) / m << 16 | (sum[3] + m / 2) / m << 24;
     }
     p4a_free(col), p4a_free(tmp), p4a_free(pos), p4a_free(tpos), p4a_free(pos_hi), p4a_free(box);
-    sceKernelDcacheWritebackRange(palette, 256 * 4);
-    Raster copy = *r;
-    copy.depth = 8, copy.stride = w, copy.originalPixels = copy.cpPixels = indices, copy.palette = (unsigned char *)palette;
-    swizzle_to_arena = 1;
-    swizzle_raster(&copy); /* swizzled with its mip levels, as the original; frees the rows when it swizzles */
-    swizzle_to_arena = 0;
-    if (!swizzle_head(copy.originalPixels))
-        sceKernelDcacheWritebackRange(copy.originalPixels, n);
-    slot->of = r, slot->pixels = r->originalPixels, slot->copy = copy;
+    clut32_install(r, slot, 8, indices, (unsigned char *)palette);
     clut32_made++;
     unsigned ms = (sceKernelGetSystemTimeLow() - t0) / 1000;
     clut32_ms += ms;
@@ -206,7 +289,9 @@ static Raster *clut32_find(Raster *r)
             return r;
         ge_swizzle(r->originalPixels, linear, r->stride, r->height, h->wbytes, h->rows, 0);
     }
-    clut32_make(r, linear ? linear : r->originalPixels, free_slot);
+    const unsigned char *rows = linear ? linear : r->originalPixels;
+    if (!p4_clut_pack || !clut_pack_read(r, rows, free_slot))
+        clut32_make(r, rows, free_slot);
     p4a_free(linear);
     if (!free_slot->of) /* no memory: remember the refusal */
         free_slot->of = r, free_slot->pixels = r->originalPixels;

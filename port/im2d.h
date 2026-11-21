@@ -160,10 +160,19 @@ static void tex2d_report(void)
     }
     free(tex2d), tex2d = 0;
 }
+/* b1395 fill diagnostics (GE texture fetch): p4_probe_tlevel N draws every mipmapped texture from mip level N,
+   p4_probe_tfilter 1 samples nearest instead of bilinear. Pictures change; for A/B of GE wait only. */
+int p4_probe_tlevel = 0, p4_probe_tfilter = 0;
+/* b1395 p4_mip_bias: the GE's automatic mip level moved by this many sixteenths of a level (TLEVEL bias, signed 4.4):
+   16 picks one level smaller, a quarter of the texels. b1394 dialogue: p4_mipmaps 0 took the GE wait 14 -> 36 ms and
+   the CPU +11.5 ms (shared bus), so texel reads from RAM are the GE's cost. 0: as before. */
+int p4_mip_bias = 0;
 static void bind_raster(Raster *r, int wrap)
 {
     if (tex2d_now && p4_tex2d_census)
         tex2d_note(r);
+    if (sl_recording && r) /* b439: the rasters a static list binds key it */
+        sl_tex_note(r);
     unsigned kept = kept_textures;
     rtt_sampled += r && r != &display_raster && rtt_find(r); /* b330 */
     if (p4_clut32 && r && r->depth == 32 && r != &display_raster && !rtt_find(r))
@@ -252,6 +261,7 @@ static void bind_raster_body(Raster *r, int wrap)
     int psm = r->depth == 32 ? GU_PSM_8888 : r->depth == 16 ? GU_PSM_5551 : r->depth == 8 ? GU_PSM_T8 : GU_PSM_T4;
     st_enable(GU_TEXTURE_2D, 1);
     if (p4_ge_raw) { /* b365: the same words libpspgu sends, one TEXFLUSH at the end instead of one per call */
+        unsigned *state = state_call_begin();
         if (r->depth <= 8) {
             ge_word(0xC5, GU_PSM_8888 | 0xff << 8);                                   /* CMODE */
             ge_word(0xB0, (unsigned)r->palette & 0xffffff);                            /* CBP */
@@ -283,10 +293,16 @@ static void bind_raster_body(Raster *r, int wrap)
             level += l ? size : (sw ? sw->wbytes * sw->rows : 0);
         }
         ge_word(0xC9, GU_TCC_RGBA << 8 | GU_TFX_MODULATE);                             /* TFUNC */
-        ge_word(0xC6, GU_LINEAR << 8 | (levels > 1 ? GU_LINEAR_MIPMAP_NEAREST : GU_LINEAR)); /* TFILTER */
-        ge_word(0xC8, GU_TEXTURE_AUTO);                                                 /* TLEVEL, bias 0 */
+        if (p4_probe_tfilter) /* b1395 diagnostic: point sampling */
+            ge_word(0xC6, GU_NEAREST << 8 | (levels > 1 ? GU_NEAREST_MIPMAP_NEAREST : GU_NEAREST));
+        else
+            ge_word(0xC6, GU_LINEAR << 8 | (levels > 1 ? GU_LINEAR_MIPMAP_NEAREST : GU_LINEAR)); /* TFILTER */
+        /* b1395 diagnostic p4_probe_tlevel N: every mipmapped texture drawn from level N (TLEVEL constant, bias N x 16) */
+        ge_word(0xC8, p4_probe_tlevel && levels > 1 ? (GU_TEXTURE_CONST | (p4_probe_tlevel * 16 & 0xff) << 16) :
+                      (GU_TEXTURE_AUTO | (unsigned)(p4_mip_bias & 0xff) << 16));            /* TLEVEL */
         ge_word(0xC7, wrap < 2 ? (wrap << 8 | wrap) : (((wrap - 2) >> 1) << 8 | ((wrap - 2) & 1))); /* TWRAP */
         ge_word(0xCB, 0);                                                               /* TFLUSH */
+        state_call_end(state);
         texture_w = r->width;
         texture_h = r->height;
         return;
@@ -300,16 +316,40 @@ static void bind_raster_body(Raster *r, int wrap)
     bound_alpha_max = swizzled ? swizzled->alpha_max : 255;
     int levels = swizzled && p4_mipmaps ? swizzled->levels : 1;
     sceGuTexMode(psm, levels - 1, 0, swizzled != 0);
-    sceGuTexImage(0, pow2_at_least(r->width), pow2_at_least(r->height), swizzled ? swizzled->wbytes * 8 / r->depth : r->width, r->originalPixels);
-    const unsigned char *level = r->originalPixels + (swizzled ? swizzled->wbytes * swizzled->rows : 0);
-    for (int l = 1; l < levels; l++) { /* swizzled and power of two: see mip_levels */
-        int wbytes, rows, size = mip_level_size(r, l, &wbytes, &rows);
-        sceGuTexImage(l, r->width >> l, r->height >> l, wbytes * 8 / r->depth, level);
-        level += size;
+    if (levels > 1 && r->width <= 512 && r->height <= 512) {
+        /* swizzled and power of two (see mip_levels): each level's TBP/TBW/TSIZE as sceGuTexImage writes them, but
+           one TEXFLUSH for the chain instead of one a level (from the persona4-portable fork, perf02) */
+        int wlog = 31 - __builtin_clz((unsigned)r->width), hlog = 31 - __builtin_clz((unsigned)r->height);
+        int wbytes = swizzled->wbytes, rows = swizzled->rows;
+        unsigned address = (unsigned)r->originalPixels, *cmd = gu_list->current;
+        for (int l = 0; l < levels; l++) {
+            if (l)
+                mip_level_size(r, l, &wbytes, &rows);
+            *cmd++ = ((0xa0u + l) << 24) | (address & 0xffffffu);
+            *cmd++ = ((0xa8u + l) << 24) | ((address >> 8) & 0xf0000u) | (unsigned)(wbytes * 8 / r->depth);
+            *cmd++ = ((0xb8u + l) << 24) | (unsigned)((hlog - l) << 8) | (unsigned)(wlog - l);
+            address += wbytes * rows;
+        }
+        gu_list->current = cmd;
+        sceGuTexFlush();
+    } else {
+        sceGuTexImage(0, pow2_at_least(r->width), pow2_at_least(r->height), swizzled ? swizzled->wbytes * 8 / r->depth : r->width, r->originalPixels);
+        const unsigned char *level = r->originalPixels + (swizzled ? swizzled->wbytes * swizzled->rows : 0);
+        for (int l = 1; l < levels; l++) {
+            int wbytes, rows, size = mip_level_size(r, l, &wbytes, &rows);
+            sceGuTexImage(l, r->width >> l, r->height >> l, wbytes * 8 / r->depth, level);
+            level += size;
+        }
     }
     sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-    sceGuTexFilter(levels > 1 ? GU_LINEAR_MIPMAP_NEAREST : GU_LINEAR, GU_LINEAR);
-    sceGuTexLevelMode(GU_TEXTURE_AUTO, 0);
+    if (p4_probe_tfilter)
+        sceGuTexFilter(levels > 1 ? GU_NEAREST_MIPMAP_NEAREST : GU_NEAREST, GU_NEAREST);
+    else
+        sceGuTexFilter(levels > 1 ? GU_LINEAR_MIPMAP_NEAREST : GU_LINEAR, GU_LINEAR);
+    if (p4_probe_tlevel && levels > 1)
+        sceGuTexLevelMode(GU_TEXTURE_CONST, (float)p4_probe_tlevel);
+    else
+        sceGuTexLevelMode(GU_TEXTURE_AUTO, p4_mip_bias / 16.0f);
     tex_wrap(wrap);
     texture_w = r->width;
     texture_h = r->height;
@@ -410,9 +450,10 @@ static void keep_previous_copy(void)
     keep_previous_copies++;
 }
 
-static void begin_frame(void)
+P4_HOT static void begin_frame(void)
 {
     if (!in_frame) {
+        load_release_check(); /* b414 */
         frame_colour_pending = 1;
         gu_dirty(); /* a new list */
         in_frame = 1;
@@ -511,6 +552,11 @@ static void shadow_fade(GuVertex *out, int count)
 static const int gu_prim[7] = { GU_POINTS, GU_LINES, GU_LINE_STRIP, GU_TRIANGLES, GU_TRIANGLE_STRIP, GU_TRIANGLE_FAN, GU_POINTS };
 #include "alpha_mask.h"
 
+static void census2d_book(unsigned ge_us);
+extern int p4_2d_cache;
+static unsigned ui_cache_hits, ui_cache_misses; /* b1401, defined with the 2D state cache */
+int p4_2d_texonly = 1; /* b448, see ui_draw_state */
+static unsigned ui_cache_texonly, ui_why[8], ui_why_rs[16];
 static int draw_body(int prim, const Vertex2D *vertices, const unsigned short *indices, int count);
 static int draw(int prim, const Vertex2D *vertices, const unsigned short *indices, int count)
 {
@@ -521,10 +567,14 @@ static int draw(int prim, const Vertex2D *vertices, const unsigned short *indice
     prof_begin(PROF_2D);
     if (gate_closed)
         gate_poll();
+    prof_begin(PROF_2FLUSH);
+    translucent_flush(); /* b1394: before the timed piece, so its GE time is the late pass's, not this draw's */
+    prof_end(PROF_2FLUSH);
     int timed = ge_time_begin();
     rtt_2d += rtt_target != 0;
+    census2d_book(0);
     int r = draw_body(prim, vertices, indices, count);
-    ge_time_end(timed, GT_2D);
+    census2d_book(ge_time_end(timed, GT_2D));
     prof_end(PROF_2D);
     return r;
 }
@@ -536,7 +586,9 @@ int p4_2d_nan_drop = 1;
 float p4_panel_scale = 0.0f; /* b225: the battle panel frame's scale where retail leaves it unset (census FIXES); 0: nothing, as on the PS2 */
 static unsigned nan_2d_dropped;
 unsigned p4_2d_nan_report(void) { unsigned n = nan_2d_dropped; nan_2d_dropped = 0; return n; }
-typedef struct { const void *raster; unsigned blend, mask, prim, calls, w, h; float area; } Census2D;
+typedef struct { const void *raster; unsigned blend, mask, prim, calls, w, h, ge_us; float area; } Census2D;
+extern int p4_2d_null_add;
+static Census2D *census2d_last; /* b1393: the entry the draw in progress was booked to; draw() adds its GE time */
 static Census2D *census2d; /* b260: heap on first use (.bss is full); census2d_shown (declared above): single draws logged in this window */
 static void census2d_note(int prim, const Vertex2D *vertices, const unsigned short *indices, int count)
 {
@@ -587,23 +639,41 @@ static void census2d_note(int prim, const Vertex2D *vertices, const unsigned sho
         }
         e->calls++;
         e->area += (x1 - x0) * (y1 - y0) / (640.0f * 448.0f);
+        census2d_last = e;
         return;
     }
 }
+static void census2d_book(unsigned ge_us) /* b1393: 0 before a draw; after it, its GE time to its class */
+{
+    if (census2d_last)
+        census2d_last->ge_us += ge_us;
+    census2d_last = 0;
+}
+static unsigned null_add_skipped;
 static void census2d_report(unsigned census2d_frames)
 {
+    if (p4_2d_null_add || null_add_skipped)
+        p4_log("2d null add %d: draws left out %u per %u frames\n", p4_2d_null_add, null_add_skipped, census2d_frames);
+    null_add_skipped = 0;
+    if (p4_2d_cache || ui_cache_hits)
+        p4_log("2d cache %d: state kept %u texture only %u set %u per %u frames; set because: not plain %u epoch %u target %u alpha %u mask %u texgen %u sky %u render %u (rs 0..15: %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u)\n", p4_2d_cache, ui_cache_hits, ui_cache_texonly, ui_cache_misses, census2d_frames,
+               ui_why[0], ui_why[1], ui_why[2], ui_why[3], ui_why[4], ui_why[5], ui_why[6], ui_why[7], ui_why_rs[0], ui_why_rs[1], ui_why_rs[2], ui_why_rs[3], ui_why_rs[4], ui_why_rs[5], ui_why_rs[6], ui_why_rs[7], ui_why_rs[8], ui_why_rs[9], ui_why_rs[10], ui_why_rs[11], ui_why_rs[12], ui_why_rs[13], ui_why_rs[14], ui_why_rs[15]);
+    memset(ui_why, 0, sizeof ui_why), memset(ui_why_rs, 0, sizeof ui_why_rs);
+    ui_cache_hits = ui_cache_misses = ui_cache_texonly = 0;
     if (!p4_probe_2d || !census2d_frames || !census2d)
         return;
-    for (int k = 0; k < 12; k++) {
+    /* b1393: with p4_exp_ge_time (pipeline off) each class carries the GE's own time and the rows go by it */
+    for (int k = 0; k < 16; k++) {
         Census2D *best = 0;
         for (int i = 0; i < 64; i++)
-            if (census2d[i].calls && (!best || census2d[i].area > best->area))
+            if (census2d[i].calls && (!best || (p4_exp_ge_time ? census2d[i].ge_us > best->ge_us : census2d[i].area > best->area)))
                 best = &census2d[i];
         if (!best)
             break;
-        p4_log("census2d %2d raster %p %s %ux%u blend %02x mask %08x prim %u: draws %u screens %d.%02d per frame\n", k, best->raster,
+        p4_log("census2d %2d raster %p %s %ux%u blend %02x mask %08x prim %u: draws %u screens %d.%02d ge_us %u per frame\n", k, best->raster,
                best->raster == (const void *)&display_raster ? "SCREEN" : "", best->w, best->h, best->blend, best->mask, best->prim,
-               best->calls / census2d_frames, (int)(best->area / census2d_frames), (int)(best->area * 100 / census2d_frames) % 100);
+               best->calls / census2d_frames, (int)(best->area / census2d_frames), (int)(best->area * 100 / census2d_frames) % 100,
+               best->ge_us / census2d_frames);
         best->calls = 0;
     }
     memset(census2d, 0, 64 * sizeof *census2d);
@@ -727,10 +797,7 @@ int p4_draw_tv_ring(const float (*outer)[2], int outer_count, const float (*inne
     sceGuPixelMask(0x7fffffff);
     sceGuStencilOp(GU_KEEP, GU_KEEP, GU_REPLACE);
     sceGuStencilFunc(GU_ALWAYS, 0, 0x80);
-    GuVertex *clear = sceGuGetMemory(2 * sizeof *clear);
-    clear[0] = (GuVertex){0, 0, 0, 0, 0, 0};
-    clear[1] = (GuVertex){0, 0, 0, target_w, target_h, 0};
-    sceGuDrawArray(GU_SPRITES, GU_2D_FORMAT, 2, 0, clear);
+    fill_target(0, 0);
 
     const float degrees = 0.0174532925199433f;
     float fringe = rgb == 0x76bf48 ? 4.0f : rgb == 0x4883bf ? 2.0f : rgb == 0xbf4848 ? -2.0f : 0.0f;
@@ -835,9 +902,63 @@ void p4_draw_texture_tint(unsigned rgba, float x, float y, float mask_x, float m
 }
 
 
+/* b1401 p4_2d_cache: a 2D draw whose inputs (render and GS state, pixel mask, alpha, texture, its pixels and palette,
+   texture generation) equal the previous 2D draw's, with no other GE state written since (ui_epoch: gu_dirty, the 3D
+   state cache, a new list) and that draw drawn plainly, sends no state again. Not in camera textures and not for
+   screen copies. 0: every 2D draw sets its state, as b1399. */
+int p4_2d_cache = 1; /* b448: on (PSP Margaret dialogue b447: CPU -0.7..0.8 ms, 2D 5.33 -> 4.72 ms, frame imiss -2.4k; picture checked) */
+static void ui_draw_state_body(unsigned alpha);
+static int ui_cache_ok;
+static unsigned ui_cache_epoch, ui_cache_alpha, ui_cache_mask, ui_cache_texgen, ui_cache_sky[8], ui_cache_hits, ui_cache_misses;
+static int ui_cache_rs[MAX_STATE];
+static const void *ui_cache_pixels, *ui_cache_palette;
 static void ui_draw_state(unsigned alpha)
 {
-    gu_dirty(); /* raw sceGu below: the mesh state cache no longer holds */
+    const Raster *r = (const Raster *)render_state[1];
+    const void *pixels = r && r != &display_raster ? r->originalPixels : 0, *palette = r && r != &display_raster ? r->palette : 0;
+    if (p4_2d_cache && p4_2d_lean && ui_cache_ok && ui_cache_epoch == ui_epoch && in_frame && !rtt_target && alpha == ui_cache_alpha &&
+        pixel_mask == ui_cache_mask && texture_generation == ui_cache_texgen && pixels == ui_cache_pixels && palette == ui_cache_palette &&
+        !memcmp(sky_state, ui_cache_sky, sizeof ui_cache_sky) && !memcmp(render_state, ui_cache_rs, sizeof ui_cache_rs)) {
+        ui_cache_hits++;
+        return;
+    }
+    /* b448 p4_2d_texonly: the same state as the previous plain 2D draw except its texture (the next glyph page,
+       the next sprite sheet): bind only the texture. Blend (render_state[12], sky_state[2]), depth, mask and the
+       alpha-write test do not read the texture; both rasters ordinary (not none, not the screen). 0: as b447. */
+    const Raster *was = (const Raster *)ui_cache_rs[1];
+    if (p4_2d_texonly && p4_2d_cache && p4_2d_lean && ui_cache_ok && ui_cache_epoch == ui_epoch && in_frame && !rtt_target &&
+        alpha == ui_cache_alpha && pixel_mask == ui_cache_mask && texture_generation == ui_cache_texgen &&
+        r && r != &display_raster && was && was != &display_raster &&
+        !memcmp(sky_state, ui_cache_sky, sizeof ui_cache_sky) && ui_cache_rs[0] == render_state[0] &&
+        !memcmp(render_state + 2, ui_cache_rs + 2, sizeof ui_cache_rs - 2 * sizeof *ui_cache_rs)) {
+        bind_texture();
+        ui_cache_texonly++;
+        ui_cache_rs[1] = render_state[1], ui_cache_pixels = pixels, ui_cache_palette = palette;
+        return;
+    }
+    ui_cache_misses += p4_2d_cache != 0;
+    if (p4_2d_cache) { /* b449: why the state was set again (first differing input) */
+        int why = !ui_cache_ok ? 0 : ui_cache_epoch != ui_epoch ? 1 : !in_frame || rtt_target ? 2 : alpha != ui_cache_alpha ? 3 :
+                  pixel_mask != ui_cache_mask ? 4 : texture_generation != ui_cache_texgen ? 5 :
+                  memcmp(sky_state, ui_cache_sky, sizeof ui_cache_sky) ? 6 : 7;
+        if (why == 7) { /* which render state */
+            int i = 0;
+            while (i < MAX_STATE && render_state[i] == ui_cache_rs[i])
+                i++;
+            ui_why_rs[i < 15 ? i : 15]++;
+        }
+        ui_why[why]++;
+    }
+    ui_cache_ok = 0;
+    ui_draw_state_body(alpha);
+    ui_cache_epoch = ui_epoch, ui_cache_alpha = alpha, ui_cache_mask = pixel_mask, ui_cache_texgen = texture_generation;
+    ui_cache_pixels = pixels, ui_cache_palette = palette;
+    memcpy(ui_cache_sky, sky_state, sizeof ui_cache_sky);
+    memcpy(ui_cache_rs, render_state, sizeof ui_cache_rs);
+}
+static void ui_draw_state_body(unsigned alpha)
+{
+    gu_dirty_body(!p4_2d_lean); /* raw sceGu below: the mesh state cache no longer holds; p4_2d_lean: no stall move */
     begin_frame();
     bind_depth();
     bind_mask_mode(alpha, p4_alpha_pixel || p4_2d_alpha_masks);
@@ -856,11 +977,17 @@ static void ui_draw_state(unsigned alpha)
 
 static int ui_draw_finish(int prim, int count, GuVertex *out)
 {
+    ui_cache_ok = 0; /* b1401: set again only after a plain draw below */
     if (draw_2d_alpha_mask(prim, count, out))
         return 1;
     shadow_fade(out, count);
     P4FeedbackRect rect;
-    if (p4_feedback_sprites && (Raster *)render_state[1] == &display_raster &&
+    if (p4_clear_stripes && !render_state[1] && prim == GU_TRIANGLES && !gs_alpha_fb_only() &&
+        !sceGuGetStatus(GU_CULL_FACE) && p4_feedback_rect(out, count, &rect) &&
+        rect.corner[0].x == 0 && rect.corner[0].y == 0 && rect.corner[3].x == target_w && rect.corner[3].y == target_h &&
+        out[0].z == (unsigned short)out[0].z) {
+        fill_target(out[0].colour, out[0].z);
+    } else if (p4_feedback_sprites && (Raster *)render_state[1] == &display_raster &&
         prim == GU_TRIANGLES && p4_feedback_rect(out, count, &rect)) {
         /* Small vertical sprites keep the linear framebuffer texture in the
            GE cache; retain the existing capture, filter, blend and mask. */
@@ -889,8 +1016,33 @@ static int ui_draw_finish(int prim, int count, GuVertex *out)
         gs_alpha_splits++;
     } else {
         sceGuDrawArray(prim, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D, count, 0, out);
+        ui_cache_ok = !rtt_target && (Raster *)render_state[1] != &display_raster;
     }
     return 1;
+}
+
+/* b1393 p4_2d_null_add: an untextured 2D draw whose blend adds nothing to the frame buffer's colour. The GS blend
+   (A - B) * C + D with D = Cd (sky_state[2]: A bits 0-1, B 2-3, C 4-5, D 6-7; 0 Cs/As, 1 Cd/Ad, 2 zero/FIX) is Cd when
+   A == B, when C = As and every vertex alpha is 0, or when A = Cs, B = 0 and every vertex colour is black. Margaret
+   dialogue: 56 such tiles (blend 0x48, rgba 0) cover the whole screen every frame. The PS2 still writes their alpha
+   (FBA), the PSP's stencil test is off for them: 1 leaves them out, to measure; whether the alpha they write is read
+   later is the open question. 0: drawn, as b392. */
+int p4_2d_null_add = 0;
+static int null_add(const Vertex2D *vertices, const unsigned short *indices, int count)
+{
+    unsigned b = sky_state[2] & 0xff;
+    if (render_state[1] || !b || (b >> 6 & 3) != 1)
+        return 0;
+    unsigned A = b & 3, B = b >> 2 & 3, C = b >> 4 & 3;
+    if (A == B)
+        return 1;
+    int alpha_zero = C == 0, black = A == 0 && B == 2;
+    for (int i = 0; i < count && (alpha_zero || black); i++) {
+        const Vertex2D *v = &vertices[indices ? indices[i] : i];
+        alpha_zero &= byte_colour(v->a) == 0;
+        black &= byte_colour(v->r) == 0 && byte_colour(v->g) == 0 && byte_colour(v->b) == 0;
+    }
+    return alpha_zero || black;
 }
 
 static int draw_body(int prim, const Vertex2D *vertices, const unsigned short *indices, int count)
@@ -900,6 +1052,15 @@ static int draw_body(int prim, const Vertex2D *vertices, const unsigned short *i
     translucent_flush();
     if (p4_probe_2d && count > 0)
         census2d_note(prim, vertices, indices, count);
+    if (p4_tex_census && count > 0 && render_state[1]) { /* b394: the box's share of the PS2 screen (640 x 448) */
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+        for (int i = 0; i < count; i++) {
+            const Vertex2D *v = &vertices[indices ? indices[i] : i];
+            x0 = v->x < x0 ? v->x : x0, x1 = v->x > x1 ? v->x : x1;
+            y0 = v->y < y0 ? v->y : y0, y1 = v->y > y1 ? v->y : y1;
+        }
+        tex_census_note((const Raster *)render_state[1], (x1 - x0) * (y1 - y0) / (640.0f * 448), 1);
+    }
     /* b223: 2D primitives with a non-finite position. The battle command panel (btlPanelDrawBackdropGrid, FUN_0020B3A0)
        passes a scale it never set once the panel has finished growing (retail: whatever $f20 held); here that is NaN,
        and the backdrop disc and its arcs went to the GE with NaN corners: the stripes across the attack cursor, PSP
@@ -933,7 +1094,13 @@ static int draw_body(int prim, const Vertex2D *vertices, const unsigned short *i
         gu_dirty();
         return 1;
     }
+    if (p4_2d_null_add && null_add(vertices, indices, count)) {
+        null_add_skipped++;
+        return 1;
+    }
+    prof_begin(PROF_2STATE);
     ui_draw_state(byte_colour(vertices[indices ? indices[0] : 0].a));
+    prof_end(PROF_2STATE);
     /* The PS2 blends these by the alpha the pass before wrote into the frame buffer. On the PSP that byte is the
        stencil, which ordinary draws leave alone, so the dream's screen-copy puffs showed as hard squares. Passes under
        half the screen are skipped; full-screen filters still draw. */
@@ -965,13 +1132,20 @@ static int draw_body(int prim, const Vertex2D *vertices, const unsigned short *i
             }
         }
     }
+    prof_begin(PROF_2VERT);
     GuVertex *out = sceGuGetMemory(count * sizeof *out);
     for (int i = 0; i < count; i++)
         put_vertex(&out[i], &vertices[indices ? indices[i] : i]);
-    return ui_draw_finish(gu_prim[prim], count, out);
+    prof_end(PROF_2VERT);
+    prof_begin(PROF_2FIN);
+    int finished = ui_draw_finish(gu_prim[prim], count, out);
+    prof_end(PROF_2FIN);
+    return finished;
 }
 
 int p4_ui_font = 1, p4_ui_sprite = 1; /* b339: on by default (PSP b1332: +0.6..1.2 fps, about -2 ms CPU in the Margaret dialogue) */
+/* Native sprite/glyph state and direct GE strips; enable for PSP image/time A/B before changing the default. */
+int p4_ui_native = 0;
 int p4_ui_quad_draw(const P4UiVertex *vertices)
 {
     if (SKIPPING || (p4_probe_flags & 2))
@@ -997,6 +1171,9 @@ int p4_ui_quad_draw(const P4UiVertex *vertices)
     prof_begin(PROF_2D);
     if (gate_closed)
         gate_poll();
+    prof_begin(PROF_2FLUSH);
+    translucent_flush(); /* b1394: outside the timed piece */
+    prof_end(PROF_2FLUSH);
     int timed = ge_time_begin();
     rtt_2d += rtt_target != 0;
     if (!list_room()) {
@@ -1004,7 +1181,6 @@ int p4_ui_quad_draw(const P4UiVertex *vertices)
         prof_end(PROF_2D);
         return 1;
     }
-    translucent_flush();
     if (p4_2d_nan_drop) {
         for (int i = 0; i < 4; i++) {
             float x = vertices[i].u.els.screen.x, y = vertices[i].u.els.screen.y;
@@ -1016,7 +1192,10 @@ int p4_ui_quad_draw(const P4UiVertex *vertices)
             }
         }
     }
+    prof_begin(PROF_2STATE);
     ui_draw_state(vertices[0].u.els.colour >> 24);
+    prof_end(PROF_2STATE);
+    prof_begin(PROF_2VERT);
     GuVertex *out = sceGuGetMemory(4 * sizeof *out);
     for (int i = 0; i < 4; i++) {
         const P4UiVertex *v = &vertices[i];
@@ -1028,7 +1207,17 @@ int p4_ui_quad_draw(const P4UiVertex *vertices)
         float z = v->u.els.screen.z;
         out[i].z = z <= 0 ? 0 : z >= 65535 ? 65535 : z;
     }
-    int result = ui_draw_finish(GU_TRIANGLE_STRIP, 4, out);
+    prof_end(PROF_2VERT);
+    prof_begin(PROF_2FIN);
+    int result;
+    if (p4_ui_native && !rtt_target && pixel_mask != 0x00ffffff && !gs_alpha_fb_only()) {
+        sceGuDrawArray(GU_TRIANGLE_STRIP, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 4, 0, out);
+        ui_cache_ok = 1;
+        result = 1;
+    } else {
+        result = ui_draw_finish(GU_TRIANGLE_STRIP, 4, out);
+    }
+    prof_end(PROF_2FIN);
     ge_time_end(timed, GT_2D);
     prof_end(PROF_2D);
     return result;

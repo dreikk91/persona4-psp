@@ -103,7 +103,7 @@ static void mat4_mul(Mat4 out, Mat4 a, Mat4 b)
     memcpy(out, r, sizeof r);
 }
 
-static void set_matrix(int which, const Matrix *m)
+P4_HOT static void set_matrix(int which, const Matrix *m)
 {
     if (p4_ge_raw && (which == GU_MODEL || which == GU_VIEW)) { /* b365: number word, then 12 floats >> 8 by rows */
         const V3 *row[4] = { &m->right, &m->up, &m->at, &m->pos };
@@ -127,7 +127,7 @@ static void set_matrix(int which, const Matrix *m)
 
 /* RenderWare's view gives x/z and y/z from 0 to 1, y going down the screen; a parallel camera (b328: Junes floor
    reflection, the "shadow map camera") gives x and y themselves, no divide. */
-static void camera_projection(ScePspFMatrix4 *out)
+P4_HOT static void camera_projection(ScePspFMatrix4 *out)
 {
     const float near = *(float *)((char *)current_camera + CAMERA_NEAR), far = *(float *)((char *)current_camera + CAMERA_FAR);
     if (*(int *)((char *)current_camera + CAMERA_PROJECTION) == 2) { /* rwPARALLEL */
@@ -143,7 +143,7 @@ static void camera_projection(ScePspFMatrix4 *out)
     *out = projection;
 }
 
-static void set_camera(void)
+P4_HOT static void set_camera(void)
 {
     if (gu_mesh_mode) { /* the same camera, view and planes as the last mesh in this mode: nothing to send */
         unsigned key[14];
@@ -252,13 +252,32 @@ enum { GUARD_MEMO = 1024 };
 static struct { const V3 *position; unsigned key; } *guard_memo; /* b299: same 1024 entries, heap to leave fixed-image space */
 
 /* model (0: the world) times view times projection: model space to clip space */
+/* b444 p4_guard_snap Q (view-space units, 0 off): the guard cuts for the camera's view with its translation rounded
+   to a grid of Q. While the camera moves inside one cell the cut (guard results) and the static lists recorded with
+   it stay the same, so a running camera keeps its guard lists for several frames instead of taking the long path
+   every frame (b441 profile, Heaven running: ~9 ms). The cut planes pass through the snapped eye; geometry closer to
+   the eye than about Q could fall behind the real eye and smear: keep Q well below the camera's height. Drawing
+   still uses the real view (set_camera). */
+float p4_guard_snap = 0;
+static Matrix guard_view_now(void)
+{
+    Matrix v = *(const Matrix *)((char *)current_camera + CAMERA_VIEW);
+    if (p4_guard_snap > 0) {
+        float q = p4_guard_snap;
+        v.pos.x = floorf(v.pos.x / q + 0.5f) * q;
+        v.pos.y = floorf(v.pos.y / q + 0.5f) * q;
+        v.pos.z = floorf(v.pos.z / q + 0.5f) * q;
+    }
+    return v;
+}
 static void guard_matrix(Mat4 m, const Matrix *model)
 {
     Mat4 view, projection;
     ScePspFMatrix4 p;
     camera_projection(&p);
     memcpy(projection, &p, sizeof projection);
-    mat4_from(view, (const Matrix *)((char *)current_camera + CAMERA_VIEW));
+    Matrix gv = guard_view_now(); /* b444 */
+    mat4_from(view, &gv);
     if (model) {
         mat4_from(m, model);
         mat4_mul(m, m, view);
@@ -313,11 +332,12 @@ static void anim_seen_at(const void *hierarchy, float depth, const Matrix *model
    plane k when W[k] . (p, 1) > 0 (near: > near). guard_sphere_inside builds model x view x projection for every array
    (b86 Heaven: 200 calls, 10.5 k cycles each); these change only with the camera. */
 static struct { unsigned key[18]; float w[5][4], len[5]; Mat4 vp; int known; } guard_world;
-static void guard_world_planes(void)
+P4_HOT static void guard_world_planes(void)
 {
     unsigned key[18];
     key[0] = (unsigned)current_camera;
-    memcpy(key + 1, (char *)current_camera + CAMERA_VIEW, 15 * 4); /* right, up, at (each + a pad word), pos */
+    Matrix gv = guard_view_now(); /* b444: the snapped view keys the planes */
+    memcpy(key + 1, &gv, 15 * 4); /* right, up, at (each + a pad word), pos */
     memcpy(key + 16, (char *)current_camera + CAMERA_NEAR, 4);
     memcpy(key + 17, (char *)current_camera + CAMERA_FAR, 4);
     if (guard_world.known && !memcmp(key, guard_world.key, sizeof key))
@@ -337,7 +357,7 @@ static void guard_world_planes(void)
 }
 /* The sphere (model space) wholly inside every plane. The model's largest row length scales the radius, so a
    non-uniform scale only makes the answer "not inside" more often (the vertices are then looked at). */
-static int guard_sphere_world(const Matrix *model, const float *sphere, float near)
+P4_HOT static int guard_sphere_world(const Matrix *model, const float *sphere, float near)
 {
     float x = sphere[0], y = sphere[1], z = sphere[2], r = sphere[3];
     if (model) {
@@ -527,7 +547,8 @@ static int draw_vertex_alpha(int vtype, int count, const void *indices, const vo
         *lo = draw_skin_alpha[0], *hi = draw_skin_alpha[1];
         return 1;
     }
-    if ((vtype & GU_VERTEX_BITS) != GU_VERTEX_32BITF || (vtype & GU_COLOR_BITS) != GU_COLOR_8888 || (vtype & GU_WEIGHT_BITS) ||
+    int short_position = (vtype & GU_VERTEX_BITS) == GU_VERTEX_16BIT;
+    if ((!short_position && (vtype & GU_VERTEX_BITS) != GU_VERTEX_32BITF) || (vtype & GU_COLOR_BITS) != GU_COLOR_8888 || (vtype & GU_WEIGHT_BITS) ||
         ((vtype & GU_INDEX_BITS) && (vtype & GU_INDEX_BITS) != GU_INDEX_16BIT) || !vertices || count <= 0)
         return 0;
     /* the bounds of the vertex colours alone (b177: kept so in cache entries, whose key no longer has the material) */
@@ -539,7 +560,7 @@ static int draw_vertex_alpha(int vtype, int count, const void *indices, const vo
     } else {
         tested_scans++;
         int short_uv = (vtype & GU_TEXTURE_BITS) == GU_TEXTURE_16BIT;
-        int stride = (vtype & GU_NORMAL_BITS ? sizeof(Vertex3DN) : sizeof(Vertex3D)) - (short_uv ? 4 : 0);
+        int stride = (vtype & GU_NORMAL_BITS ? sizeof(Vertex3DN) : sizeof(Vertex3D)) - 4 * (short_uv + short_position);
         const unsigned short *ix = (vtype & GU_INDEX_BITS) ? indices : 0;
         for (int k = 0; k < count; k++) {
             unsigned a = *(const unsigned *)((const char *)vertices + (ix ? ix[k] : k) * stride + (short_uv ? 4 : 8)) >> 24;

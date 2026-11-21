@@ -92,8 +92,7 @@ static int capsule_render(ShadowCapsule *cap, int count, float floor_y)
     rtt_bind_target(slot);
     sceGuPixelMask(0);
     sceGuDepthMask(GU_TRUE); /* mask rendering must never touch scene depth */
-    sceGuClearColor(0); sceGuClearStencil(0);
-    sceGuClear(GU_COLOR_BUFFER_BIT | GU_STENCIL_BUFFER_BIT);
+    clear_striped(GU_COLOR_BUFFER_BIT | GU_STENCIL_BUFFER_BIT, 0, 0);
     /* GE framebuffer alpha is stencil: explicitly stamp 255 for the opaque union. */
     sceGuEnable(GU_STENCIL_TEST);
     sceGuStencilFunc(GU_ALWAYS, 255, 255);

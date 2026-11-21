@@ -50,11 +50,103 @@ int DeleteThread(int id)
 int TerminateThread(int id) { return sceKernelTerminateThread(id); }
 int GetThreadId(void) { return sceKernelGetThreadId(); }
 int ChangeThreadPriority(int id, int priority) { return sceKernelChangeThreadPriority(id, psp_priority(priority)); }
-int SleepThread(void) { sceKernelSleepThread(); return 0; }
-int WakeupThread(int id) { return sceKernelWakeupThread(id); }
-int CancelWakeupThread(int id) { return sceKernelCancelWakeupThread(id); }
-int SuspendThread(int id) { return sceKernelSuspendThread(id); }
-int ResumeThread(int id) { return sceKernelResumeThread(id); }
+/* b416 p4_ee_watch: the game's sleep/wakeup calls in a ring (time, thread, target, caller, result); a watchdog thread
+   logs the ring and every game thread's state when the game's tick has not moved for 5 s (b415 PSP: floor 63 from
+   Heaven, user_main and p4 both asleep in SleepThread after F063_001.P01, no frame since). */
+int p4_ee_watch = 1;
+void p4_log(const char *fmt, ...);
+extern unsigned p4_anim_tick;
+enum { EW_RING = 64 };
+static struct { unsigned t, self, target, ra; int op, r; } ew_ring[EW_RING];
+static volatile unsigned ew_next;
+static SceUID ew_thread = -1;
+static void ew_note(int op, unsigned target, unsigned ra, int r)
+{
+    unsigned i = ew_next++ % EW_RING;
+    ew_ring[i].t = sceKernelGetSystemTimeLow(), ew_ring[i].self = sceKernelGetThreadId(), ew_ring[i].target = target;
+    ew_ring[i].ra = ra, ew_ring[i].op = op, ew_ring[i].r = r;
+}
+static const char *const ew_ops[] = { "sleep in", "sleep out", "wakeup", "cancel wakeup", "suspend", "resume", "direct sleep in", "direct sleep out" };
+static void ew_thread_state(SceUID id, const char *what)
+{
+    SceKernelThreadInfo info;
+    info.size = sizeof info;
+    if (sceKernelReferThreadStatus(id, &info) >= 0)
+        p4_log("EEWATCH thread %x %s %s: status %x wait type %d id %x wakeups %d pri %d\n", (unsigned)id, info.name, what, info.status,
+               info.waitType, (unsigned)info.waitId, info.wakeupCount, info.currentPriority);
+}
+static int ew_main(SceSize args, void *argp)
+{
+    SceUID main_thread = *(SceUID *)argp;
+    unsigned last = p4_anim_tick, still = 0, dumped = 0;
+    for (;;) {
+        sceKernelDelayThread(1000000);
+        if (p4_anim_tick != last) {
+            last = p4_anim_tick, still = 0, dumped = 0;
+            continue;
+        }
+        if (++still < 5 || dumped || !p4_ee_watch)
+            continue;
+        dumped = 1;
+        unsigned now = sceKernelGetSystemTimeLow(), n = ew_next;
+        p4_log("EEWATCH no game tick for %u s (tick %u): the last sleep/wakeup calls, oldest first\n", still, last);
+        for (unsigned k = n > EW_RING ? n - EW_RING : 0; k < n; k++) {
+            unsigned i = k % EW_RING;
+            p4_log("EEWATCH %u ms ago: thread %x %s %x from %08x -> %d\n", (now - ew_ring[i].t) / 1000, ew_ring[i].self,
+                   ew_ops[ew_ring[i].op], ew_ring[i].target, ew_ring[i].ra, ew_ring[i].r);
+        }
+        (void)main_thread;
+        SceUID ids[64];
+        int count = 0;
+        if (sceKernelGetThreadmanIdList(SCE_KERNEL_TMID_Thread, ids, 64, &count) >= 0)
+            for (int i = 0; i < count && i < 64; i++)
+                ew_thread_state(ids[i], "");
+    }
+    return 0;
+}
+static void ew_start(void)
+{
+    if (ew_thread >= 0 || !p4_ee_watch)
+        return;
+    SceUID self = sceKernelGetThreadId();
+    ew_thread = sceKernelCreateThread("p4_eewatch", ew_main, 0x70, 0x2000, PSP_THREAD_ATTR_USER, 0);
+    if (ew_thread >= 0)
+        sceKernelStartThread(ew_thread, sizeof self, &self);
+}
+int __real_sceKernelSleepThread(void);
+int SleepThread(void)
+{
+    unsigned ra = (unsigned)__builtin_return_address(0);
+    ew_start();
+    ew_note(0, 0, ra, 0);
+    int r = __real_sceKernelSleepThread();
+    ew_note(1, 0, ra, r);
+    return 0;
+}
+/* b416: a sleep that does not come through the EE call (linker --wrap): who else puts a thread to sleep */
+int __wrap_sceKernelSleepThread(void)
+{
+    unsigned ra = (unsigned)__builtin_return_address(0);
+    ew_start();
+    ew_note(6, 0, ra, 0);
+    int r = __real_sceKernelSleepThread();
+    ew_note(7, 0, ra, r);
+    return r;
+}
+int WakeupThread(int id)
+{
+    int r = sceKernelWakeupThread(id);
+    ew_note(2, (unsigned)id, (unsigned)__builtin_return_address(0), r);
+    return r;
+}
+int CancelWakeupThread(int id)
+{
+    int r = sceKernelCancelWakeupThread(id);
+    ew_note(3, (unsigned)id, (unsigned)__builtin_return_address(0), r);
+    return r;
+}
+int SuspendThread(int id) { int r = sceKernelSuspendThread(id); ew_note(4, (unsigned)id, (unsigned)__builtin_return_address(0), r); return r; }
+int ResumeThread(int id) { int r = sceKernelResumeThread(id); ew_note(5, (unsigned)id, (unsigned)__builtin_return_address(0), r); return r; }
 
 /* Enough for the game: "is it running", its priority. */
 int ReferThreadStatus(int id, ThreadParam *out)

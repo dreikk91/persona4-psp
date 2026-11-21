@@ -284,10 +284,12 @@ static int fx_draw(void *atomic, Geometry *g, char *frame)
             unsigned short *idx = sceGuGetMemory((nkept * 2 + 3) & ~3);
             memcpy(idx, kept, nkept * sizeof *kept);
             sceKernelDcacheWritebackRange(v, count * sizeof *v);
+            draw_site = DS_FX; /* b418 */
             if (opaque)
                 gu_draw(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_INDEX_16BIT | GU_TRANSFORM_3D, nkept, idx, v);
             else
                 draw_tested(GU_TRIANGLES, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_INDEX_16BIT | GU_TRANSFORM_3D, nkept, idx, v);
+            draw_site = DS_OTHER;
         }
         if (ncut) {
             sceKernelDcacheWritebackRange(cut, ncut * sizeof *cut);

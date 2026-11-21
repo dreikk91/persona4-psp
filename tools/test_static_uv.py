@@ -65,8 +65,9 @@ int main(void) {
 #include <string.h>
 #include <stdio.h>
 #include "static_uv.h"
+#include "static_position.h"
 enum {GU_TEXTURE_16BIT=2,GU_TEXTURE_32BITF=3,GU_TEXTURE_BITS=3,GU_COLOR_8888=7<<2,GU_COLOR_BITS=7<<2,
-      GU_NORMAL_8BIT=1<<5,GU_NORMAL_BITS=3<<5,GU_VERTEX_32BITF=3<<7,GU_VERTEX_BITS=3<<7,
+      GU_NORMAL_8BIT=1<<5,GU_NORMAL_BITS=3<<5,GU_VERTEX_16BIT=2<<7,GU_VERTEX_32BITF=3<<7,GU_VERTEX_BITS=3<<7,
       GU_WEIGHT_BITS=3<<9,GU_INDEX_16BIT=2<<11,GU_INDEX_BITS=3<<11};
 typedef struct {float u,v;unsigned colour;float x,y,z;} Vertex3D;
 typedef struct {float u,v;unsigned colour;signed char nx,ny,nz,pad;float x,y,z;} Vertex3DN;
@@ -77,7 +78,7 @@ static unsigned tested_scans,draw_material_alpha=255;
 static int draw_material_ge;
 '''+function(rw, 'draw_vertex_alpha(')+r'''
 int main(void) {
-    unsigned char source[128*28],packed[128*24+16],saved[sizeof source];
+    unsigned char source[128*28],packed[128*24+16],saved[sizeof source],compact[128*20];
     unsigned seed=9,lo,hi,plo,phi;
     unsigned short ix[]={3,11,37,64,127};
     int lit,i,j;
@@ -101,6 +102,9 @@ int main(void) {
         draw_material_alpha=j%2?137:255;
         assert(draw_vertex_alpha(type,5,ix,source,&lo,&hi));
         assert(draw_vertex_alpha((type&~GU_TEXTURE_BITS)|GU_TEXTURE_16BIT,5,ix,packed,&plo,&phi));
+        assert(lo==plo && hi==phi);
+        static_position_copy(compact, packed, 128, 1.0f, stride - 16);
+        assert(draw_vertex_alpha((type&~(GU_TEXTURE_BITS|GU_VERTEX_BITS))|GU_TEXTURE_16BIT|GU_VERTEX_16BIT,5,ix,compact,&plo,&phi));
         assert(lo==plo && hi==phi);
         packed[4]^=1;assert(!static_uv_same(source,packed,128,stride,decode));
     }

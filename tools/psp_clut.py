@@ -1,23 +1,9 @@
 #!/usr/bin/env python
-"""Offline CLUT textures: the player's own ISO -> p4clut.bin (game data: never ship it).
+"""Build an optional offline CLUT pack from the player's own ISO.
 
-The PS2 keeps some textures as 32-bit (PSMCT32) or 16-bit pixels. On the PSP each 32-bit texel costs 4 bytes of RAM
-and of GE texture bandwidth; an 8-bit index into a 256-entry palette costs 1 (CLUT8), a 4-bit one half a byte (CLUT4).
-This tool finds every RenderWare PS2 native texture (TextureNative chunk 0x15, platform 'PS2\\0') in the ISO,
-and for the 32/16-bit ones at least --min-texels in size writes a palettised copy that port/rwsky.c takes instead of
-the original when it reads that texture (func_003fd940; p4_clut_pack). The lookup key is the FNV-1a hash of the
-raster's width, height, depth and its pixel bytes as the stream holds them, so a texture the tool never saw is simply
-not found and loads as before.
-
-  python tools/psp_clut.py --census              # numbers only: textures by depth and size, the largest 32-bit ones
-  python tools/psp_clut.py                       # -> build/psp_dist/PSP/GAME/P4/p4clut.bin
-
-The conversion is lossy (at most 256 or 16 colours). A texture is written as CLUT4 when 16 colours reproduce it
-within --clut4-error (mean absolute error a channel), else CLUT8.
-
-File: 'P4CL' 1 count data_offset, count x (key u32, offset u32) sorted by key; per entry: u16 width, u16 height,
-u8 bits (4 or 8), u8 0, u16 0, palette (16 or 256 x u32 ABGR, alpha 0..255, PSP order), indices row by row
-(width bytes a row for CLUT8, width / 2 for CLUT4, low nibble first), padded to 4 bytes.
+P4CL v2: magic, version, count, data offset (u32); sorted rows of
+(two u32 hashes of normalized RGBA, u32 width, u32 height, u32 offset).
+Each payload has u32 depth, RGBA palette, then linear indices (low nibble first).
 """
 import argparse
 import collections
@@ -118,7 +104,7 @@ def parse_native(d, o):
     if version >= 2 and depth >= 16:
         stride = width * depth // 8
         pixels = d[blob + GIF_HEADER:blob + GIF_HEADER + stride * height]
-        if len(pixels) != stride * height:
+        if GIF_HEADER + stride * height > min(s, pixel_size):
             pixels = None
     return (names[0], width, height, depth, fmt, pixels), end
 
@@ -133,6 +119,59 @@ def fnv1a(*parts):
 
 def key_of(width, height, depth, pixels):
     return fnv1a(struct.pack('<III', width, height, depth), pixels)
+
+
+ALPHA = bytes(min(255, a * 2) for a in range(256))
+
+
+def rgba_pixels(pixels):
+    rgba = bytearray(pixels)
+    rgba[3::4] = pixels[3::4].translate(ALPHA)
+    return bytes(rgba)
+
+
+def palette_data(rgba, width, height):
+    colours = list(dict.fromkeys(struct.iter_unpack('<I', rgba)))
+    if len(colours) <= 256:
+        depth = 4 if len(colours) <= 16 and width % 2 == 0 else 8
+        lookup = {c: i for i, c in enumerate(colours)}
+        indices = bytes(lookup[c] for c in struct.iter_unpack('<I', rgba))
+        palette = b''.join(struct.pack('<I', c[0]) for c in colours).ljust(4 << depth, b'\0')
+    else:
+        from PIL import Image
+        image = Image.frombytes('RGBA', (width, height), rgba).quantize(colors=256, method=Image.Quantize.FASTOCTREE)
+        depth, indices = 8, image.tobytes()
+        palette = bytes(image.getpalette('RGBA')).ljust(1024, b'\0')
+    if depth == 4:
+        indices = bytes(a | b << 4 for a, b in zip(indices[::2], indices[1::2]))
+    return struct.pack('<I', depth) + palette + indices
+
+
+def write_pack(args):
+    rows = {}
+    for _, data in iso_files(args.iso):
+        for _, w, h, depth, _, pixels in textures(data):
+            if depth != 32 or pixels is None or max(w, h) > 512 or w * h < args.min_texels:
+                continue
+            rgba = rgba_pixels(pixels)
+            check = 5381
+            for byte in rgba:
+                check = ((check * 33) ^ byte) & 0xffffffff
+            key = fnv1a(rgba), check, w, h
+            if key not in rows:
+                rows[key] = palette_data(rgba, w, h)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    temp = args.out.with_suffix('.tmp')
+    with temp.open('wb') as f:
+        offset = 16 + len(rows) * 20
+        f.write(struct.pack('<4sIII', b'P4CL', 2, len(rows), offset))
+        for key in sorted(rows):
+            f.write(struct.pack('<5I', *key, offset))
+            offset += len(rows[key])
+        for key in sorted(rows):
+            f.write(rows[key])
+    temp.replace(args.out)
+    print(f'{args.out}: {len(rows)} textures, {offset} bytes')
 
 
 def census(args):
@@ -169,13 +208,12 @@ def main():
     ap.add_argument('--iso', type=Path, default=ISO)
     ap.add_argument('--out', type=Path, default=DIST / 'p4clut.bin')
     ap.add_argument('--census', action='store_true', help='numbers only, no file')
-    ap.add_argument('--min-texels', type=int, default=128 * 128)
-    ap.add_argument('--clut4-error', type=float, default=2.0)
+    ap.add_argument('--min-texels', type=int, default=32 * 32)
     args = ap.parse_args()
     if args.census:
         census(args)
         return
-    raise SystemExit('pack writing: next step (run --census first)')
+    write_pack(args)
 
 
 if __name__ == '__main__':

@@ -218,3 +218,41 @@ attract playback. It predates commit d6de4e1 (memcard retries, audio stream
 handles closed on failure), which only touches handles of failed streams and
 save-file reads. That commit is not the cause. The b249 handoff passed once and
 does not fix the hang; the cause is still unknown.
+
+## b400: the same hang after Junes (2026-11-18)
+
+Real PSP, b400 (flat set on), profiler off. Path: Heaven save, Junes West Entrance (field 9 room 4), back to the
+title; the hang came on the first title-return movie. P4CTOP2 (index 22) after 143646 mixed audio blocks, 4 errors,
+0 underruns; the renderer released 4.7 MB of caches; audio state 5 acknowledged; SASCORE and AVCODEC unloads 0;
+video loads AVCODEC 0 and MPEGBASE 0; no `mpeg init` line: stopped inside `sceMpegInit`, as b248/b250/b253/b265.
+
+PSPLink, read-only, on the frozen game:
+- `sceMpeg_library` (UID 0x03E18E5B) TextAddr **0x0B9C0000** (text 0x801C, bss 0x22C at 0x0B9C8040), i.e. in the
+  extra 32 MB (above 0x0A000000). b250's frozen game had it at 0x0B5C0000, also there.
+- `sceAvcodec_wrapper` at 0x881F2900 (kernel). P4 at 0x08804000, 0xC34A00 bytes.
+- Partition 2: 57671680 bytes from 0x08800000, 4251648 free, largest 4145152: the 4 MB that
+  `PSP_HEAP_THRESHOLD_SIZE_KB(4096)` leaves outside the heap, at the top. Every utility module the game loads after
+  boot (MPEGBASE, SASCORE, AVCODEC's user parts) lands there, above 0x0A000000.
+- Partition 5 (volatile, 0x08400000): 4 MB free at this point (the movie's buffers are carved after the lock).
+
+Lead, not proven: b170 found sceMpegCreate never returning when its work area was at 0x0a31b040 and fixed it by
+moving the buffers to the volatile block below 0x0A000000. The MPEG library's own data (its bss, which may hold
+what it hands the Media Engine) is still above 0x0A000000 every time. Whether that is why sceMpegInit's ME RPC never
+completes needs: the library's address logged for every movie (passing and hung), then an experiment that gets it
+loaded below 0x0A000000 (a low partition block reserved before the heap is claimed and freed just before
+sceUtilityLoadAvModule(MPEGBASE)).
+
+## b1402 and b426: the MPEG library loaded below 0x0A000000 (2026-11-20)
+
+b1402 (worktree p3f-chk, uncommitted until b426): `p4_video_low` 1 reserves a 256 KB block at the bottom of
+partition 2 before the heap is claimed (`__libpthreadglue_init`), frees it just before `sceUtilityLoadAvModule
+(MPEGBASE)` and takes it again after MPEGBASE unloads; every movie logs `mpeg library at ...`. On the PSP the
+library landed at 0x09438A00 for all 20 movies of a title attract loop (P4CTOP1/P4CTOP2 alternating, ~30 min),
+`mpeg init` 0 each time; b253 had hung 4 times in the same loop in under 2 min. Not yet run through a title return
+after gameplay.
+
+b424 (no low hole, profiler on): the hang again on the first P4CTOP2 after field 63 -> title, stopped after `load
+mpegbase` inside `sceMpegInit`; the library's address was not logged in that build.
+
+b426 = main with the b1402 change (fps overlay and build number left out). Next: field 63 or Junes -> title on b426,
+check `mpeg library at` (below 0x0A000000) and `mpeg init 00000000`.

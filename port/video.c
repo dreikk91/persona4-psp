@@ -14,6 +14,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <pspsysmem.h>
+#include <pspmodulemgr.h>
 
 #include "video.h"
 
@@ -130,6 +132,47 @@ static void *vol_ddr, *vol_output, *vol_packet, *vol_work, *vol_params;
  * Keep the old reuse experiment available for diagnosis, but close the normal
  * session completely while SAS is still paused. */
 int p4_video_keep = 0;
+/* b1402 p4_video_low: the title-return hang stops inside sceMpegInit (a Media Engine RPC that never answers), and
+   every frozen game had the MPEG library in the extra 32 MB (b250 0x0B5C0000, b400 0x0B9C0000): the heap takes all of
+   partition 2 but the top 4 MB (PSP_HEAP_THRESHOLD_SIZE_KB), so every module loaded later lands above 0x0A000000.
+   Like b170's work area (sceMpegCreate hung at 0x0a31b040). A block below the heap is reserved before the heap is
+   claimed (__libpthreadglue_init runs before libcglue's first malloc), freed just before MPEGBASE loads (the loader
+   takes the lowest free block) and taken again after it unloads. Each movie logs where the library landed.
+   0: the hole is kept and the library loads where it did before. */
+int p4_video_low = 1;
+enum { LOW_HOLE = 256 * 1024 };
+static SceUID low_hole = -1;
+static unsigned low_hole_at;
+static void low_hole_take(void)
+{
+    if (low_hole >= 0)
+        return;
+    low_hole = sceKernelAllocPartitionMemory(2, "p4_me_low", PSP_SMEM_Low, LOW_HOLE, NULL);
+    low_hole_at = low_hole >= 0 ? (unsigned)sceKernelGetBlockHeadAddr(low_hole) : 0;
+}
+/* libcglue calls this weak hook from __libcglue_init before __init_cwd and before the heap's first sbrk */
+void pthread_init(void);
+void __libpthreadglue_init(void)
+{
+    low_hole_take();
+    pthread_init();
+}
+unsigned p4_video_low_hole(void) { return low_hole_at; }
+static unsigned mpeg_library_at(void)
+{
+    SceUID ids[64];
+    int count = 0;
+    if (sceKernelGetModuleIdList(ids, sizeof ids, &count) < 0)
+        return 0;
+    for (int i = 0; i < count && i < 64; i++) {
+        SceKernelModuleInfo info;
+        memset(&info, 0, sizeof info);
+        info.size = sizeof info;
+        if (sceKernelQueryModuleInfo(ids[i], &info) >= 0 && !strcmp(info.name, "sceMpeg_library"))
+            return (unsigned)info.text_addr;
+    }
+    return 0;
+}
 static int vol_held, kept;
 static SceMpeg kept_mpeg;
 static SceMpegRingbuffer rb; /* a kept SceMpeg points at it */
@@ -197,8 +240,16 @@ int p4_video_play(const char *directory, const char *name, int muted)
         codec_loaded = r < 0 ? 2 : 1;
     }
     if (!base_loaded) {
+        int freed = -1;
+        if (p4_video_low && low_hole >= 0) {
+            freed = sceKernelFreePartitionMemory(low_hole);
+            if (freed >= 0) low_hole = -1;
+        }
         r = sceUtilityLoadAvModule(PSP_AV_MODULE_MPEGBASE);
-        log_line("load mpegbase %08x", r); if (r < 0) goto done; base_loaded = 1;
+        log_line("load mpegbase %08x", r);
+        log_line("mpeg library at %08x (low hole %08x freed %d, free %d KB max %d KB)", mpeg_library_at(), low_hole_at, freed,
+                 (int)sceKernelTotalFreeMemSize() / 1024, (int)sceKernelMaxFreeMemSize() / 1024);
+        if (r < 0) goto done; base_loaded = 1;
     }
     if (!initialized) {
         r = sceMpegInit(); log_line("mpeg init %08x", r); if (r < 0) goto done; initialized = 1;
@@ -373,6 +424,10 @@ void p4_video_shutdown(void)
     if (base_loaded) {
         int r = sceUtilityUnloadAvModule(PSP_AV_MODULE_MPEGBASE);
         log_line("unload mpegbase %08x", r); if (r >= 0) base_loaded = 0;
+        if (!base_loaded) {
+            low_hole_take(); /* b1402: the same low block for the next movie */
+            log_line("low hole again %08x", low_hole_at);
+        }
     }
     if (!base_loaded && codec_loaded == 1) {
         int r = sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC);

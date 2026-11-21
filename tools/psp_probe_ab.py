@@ -24,13 +24,16 @@ DEFAULTS = {'p4_probe_flags': 0, 'p4_probe_geometry': 0, 'p4_probe_keep_every': 
             'p4_strip_pack': 1, 'p4_strip_prims': 0,
             'p4_mesh_frustum': 0, 'p4_exp_scissor': 0, 'p4_exp_ge_time': 0,
             'p4_ge_skin': 1, 'p4_ge_light': 1, 'p4_guard_clip': 1, 'p4_guard_compact': 1, 'p4_guard_near_ge': 0, 'p4_guard_clip_fast': 1, 'p4_guard_gnear': 1, 'p4_guard_boxes': 1, 'p4_uv_shift_step': 1, 'p4_cache_audit': 0, 'p4_cache_budget': 6291456,
-            'p4_gs_test': 1, 'p4_gs_test_skip': 1, 'p4_pipeline': 1, 'p4_mipmaps': 1, 'p4_cull_far': 0, 'p4_guard_world': 1, 'p4_guard_full_cache': 1, 'p4_instance_replay': 1, 'p4_fog': 1, 'p4_vsync_late': 1, 'p4_light_prelit': 1, 'p4_light_unprelit': 1, 'p4_gs_mesh_alpha': 1, 'p4_flip_event': 1, 'p4_cover_stats': 0, 'p4_bone_direct': 1, 'p4_list_cached': 1, 'p4_skin_alpha': 1, 'p4_alpha_x2': 0, 'p4_im3d': 1, 'p4_uv_memo': 1, 'p4_hanim_c': 1, 'p4_hanim_vfpu': 1, 'p4_hanim_check': 0, 'p4_guard_chunk': 8, 'p4_guard_loop2': 1, 'p4_guard_box_vfpu': 1, 'p4_guard_box_check': 0, 'p4_probe_2d': 0, 'p4_frameskip': 1, 'p4_frameskip_max': 2, 'p4_frameskip_bones': 1, 'p4_uv_rebase': 1, 'p4_pose_plain': 0, 'p4_hanim_nan_fix': 1, 'p4_bone_check': 0, 'p4_dst_alpha_passes': 1, 'p4_lock_memo': 1, 'p4_rtt': 1, 'p4_skin_guard_fast': 1, 'p4_skin_guard_check': 0, 'p4_skin_vfpu': 1, 'p4_skin_vfpu_check': 0, 'p4_anim_cull': 0, 'p4_anim_far': 1, 'p4_anim_far_step': 2, 'p4_anim_far_depth': 500.0, 'p4_anim_far_kadd': 1, 'p4_skin_call': 1, 'p4_mesh_call': 1, 'p4_shadow_lookat': 1, 'p4_shadow_capsule': 1, 'p4_skip_visual_bits': 3, 'p4_guard_small': 0, 'p4_skin_sticky': 1, 'p4_skin_regroup': 1, 'p4_skin_pack': 1, 'p4_anim_skip_kadd': 1, 'p4_anim_lazy': 1, 'p4_anim_lazy_check': 0, 'p4_anim_native': 1, 'p4_anim_keymap': 1, 'p4_replay_census': 0, 'p4_skin_palette': 8, 'p4_bone_census': 0, 'p4_skin_strip': 1, 'p4_skin_simplify': 0, 'p4_mesh_override': 0, 'p4_mesh_capture': 0, 'p4_strip_why': 0, 'p4_strip_check': 0, 'p4_head_trace': 0, 'p4_look_fix': 1, 'p4_fpu_chop': 0, 'p4_2d_nan_drop': 1, 'p4_panel_scale': 0.0, 'p4_hanim_time': 1, 'p4_skin_free_wait': 1, 'p4_skin_dummy': 0, 'p4_skin_lod_depth': 0.0, 'p4_skin_lod_keep': 50, 'p4_cull_min_vertices': 500, 'p4_cull_cover': 0, 'p4_guard_result': 1, 'p4_guard_result_check': 0}
+            'p4_gs_test': 1, 'p4_gs_test_skip': 1, 'p4_pipeline': 1, 'p4_mipmaps': 1, 'p4_cull_far': 0, 'p4_guard_world': 1, 'p4_guard_full_cache': 1, 'p4_instance_replay': 1, 'p4_fog': 1, 'p4_vsync_late': 1, 'p4_light_prelit': 1, 'p4_light_unprelit': 1, 'p4_gs_mesh_alpha': 1, 'p4_flip_event': 1, 'p4_cover_stats': 0, 'p4_bone_direct': 1, 'p4_list_cached': 1, 'p4_skin_alpha': 1, 'p4_alpha_x2': 0, 'p4_im3d': 1, 'p4_uv_memo': 1, 'p4_hanim_c': 1, 'p4_hanim_vfpu': 1, 'p4_hanim_check': 0, 'p4_guard_chunk': 8, 'p4_guard_loop2': 1, 'p4_guard_box_vfpu': 1, 'p4_guard_box_check': 0, 'p4_probe_2d': 0, 'p4_frameskip': 1, 'p4_frameskip_max': 2, 'p4_frameskip_bones': 1, 'p4_uv_rebase': 1, 'p4_pose_plain': 0, 'p4_hanim_nan_fix': 1, 'p4_bone_check': 0, 'p4_dst_alpha_passes': 1, 'p4_lock_memo': 1, 'p4_rtt': 1, 'p4_skin_guard_fast': 1, 'p4_skin_guard_check': 0, 'p4_skin_vfpu': 1, 'p4_skin_vfpu_check': 0, 'p4_anim_cull': 0, 'p4_anim_far': 0, 'p4_anim_far_step': 2, 'p4_anim_far_depth': 500.0, 'p4_anim_far_kadd': 1, 'p4_skin_call': 1, 'p4_mesh_call': 1, 'p4_shadow_lookat': 1, 'p4_shadow_capsule': 1, 'p4_skip_visual_bits': 3, 'p4_guard_small': 0, 'p4_skin_sticky': 1, 'p4_skin_regroup': 1, 'p4_skin_pack': 1, 'p4_anim_skip_kadd': 1, 'p4_anim_lazy': 0, 'p4_anim_lazy_check': 0, 'p4_anim_native': 1, 'p4_anim_keymap': 1, 'p4_replay_census': 0, 'p4_skin_palette': 8, 'p4_bone_census': 0, 'p4_skin_strip': 1, 'p4_skin_simplify': 0, 'p4_mesh_override': 0, 'p4_mesh_capture': 0, 'p4_strip_why': 0, 'p4_strip_check': 0, 'p4_head_trace': 0, 'p4_look_fix': 1, 'p4_fpu_chop': 0, 'p4_2d_nan_drop': 1, 'p4_panel_scale': 0.0, 'p4_hanim_time': 1, 'p4_skin_free_wait': 1, 'p4_skin_dummy': 0, 'p4_skin_lod_depth': 0.0, 'p4_skin_lod_keep': 50, 'p4_cull_min_vertices': 500, 'p4_cull_cover': 0, 'p4_guard_result': 1, 'p4_guard_result_check': 0}
 DEFAULTS.update(p4_ui_font=1, p4_ui_sprite=1, p4_font_skip=0, p4_calendar_skip=0)
 FLOATS = {'p4_guard_big', 'p4_guard_tiny', 'p4_probe_depth_cut', 'p4_anim_far_depth', 'p4_panel_scale', 'p4_skin_lod_depth', 'p4_skin_far_depth'}
 DEFAULTS.update(p4_static_state_cache=0, p4_static_state_check=0)
 DEFAULTS.update(p4_2d_alpha_masks=1, p4_translucent_late=1)
-DEFAULTS.update(p4_skin_guard=0, p4_sync_skip_fresh=0, p4_sync_skip_check=0, p4_frame_census=0, p4_prof_clock=0, p4_matfx_env_ge=0, p4_frame_lazy=0, p4_guard_big=1.0, p4_anim_freeze=0, p4_static_list=1, p4_inst_batch=1, p4_clut32=1, p4_ge_raw=1, p4_cull_back=3, p4_keep_previous=0, p4_skin_guard_box=1, p4_im3d_cull=1, p4_feedback_sprites=1, p4_feedback_half=1, p4_screen_date=1, p4_gs_alpha_test=1, p4_alpha_write_test=1, p4_rtt_alpha=1, p4_timeline=0, p4_list_double=0)  # b356-b364, b370
+DEFAULTS.update(p4_skin_guard=0, p4_sync_skip_fresh=0, p4_sync_skip_check=0, p4_frame_census=0, p4_prof_clock=0, p4_matfx_env_ge=0, p4_frame_lazy=0, p4_guard_big=1.0, p4_anim_freeze=0, p4_static_list=1, p4_inst_batch=1, p4_clut32=1, p4_ge_raw=1, p4_cull_back=3, p4_keep_previous=0, p4_skin_guard_box=1, p4_im3d_cull=1, p4_feedback_sprites=1, p4_feedback_half=1, p4_screen_date=1, p4_gs_alpha_test=1, p4_alpha_write_test=1, p4_rtt_alpha=1, p4_timeline=0, p4_list_double=1)  # b356-b364, b370
 DEFAULTS.update(p4_clut32_min=0, p4_guard_tiny=0.0)  # b388
+DEFAULTS.update(p4_skin_wsplit=2, p4_clock_prof=0, p4_skin_nocolour=1, p4_skin_flat=1, p4_static_flat=1, p4_skin_drop_original=1)  # b390-b393
+DEFAULTS.update(p4_2d_null_add=0, p4_probe_tlevel=0, p4_probe_tfilter=0, p4_mip_bias=0, p4_probe_fill=0, p4_2d_lean=1, p4_2d_cache=1, p4_2d_texonly=1)  # b1393-b1401
+DEFAULTS.update(p4_ui_native=0)  # b450: restore the compatibility path after native UI probes
 DEFAULTS.update(p4_particle_vfpu=1, p4_particle_vfpu_check=0)
 DEFAULTS.update(p4_fx_skip_draw=0, p4_skip_model_lite=7)
 DEFAULTS.update(p4_static_uv_pack=1, p4_static_uv_check=0)
@@ -38,10 +41,20 @@ DEFAULTS.update(p4_static_position_pack=1)
 DEFAULTS.update(p4_ge_static_clip=0, p4_ge_clip_growth=256)
 DEFAULTS.update(p4_static_guard_lists=1, p4_sl_trust=0)
 DEFAULTS.update(p4_ptank_spill_budget=2 << 20)
+DEFAULTS.update(p4_static_colour16=1, p4_anim_trace=0, p4_anim_trace_h=0)  # b409-b411
+DEFAULTS.update(p4_flat_all=0, p4_model_census=0)  # b419-b420
+DEFAULTS.update(p4_clut_pack=0, p4_mesh_strip_pack=0)
+DEFAULTS.update(p4_clear_stripes=1, p4_chain_strips=0, p4_compact_immediate=0, p4_state_call=0)
+DEFAULTS.update(p4_ge_split=0, p4_ge_split_grow=64, p4_ge_split_min=0)  # b434-b435
+DEFAULTS.update(p4_ge_compile=1, p4_ge_s8_step=0.35, p4_ge_s16_step=2.0, p4_ge_strips=1)  # b436-b438
+DEFAULTS.update(p4_static_chunk=0, p4_static_gate=0)  # b441-b442
+DEFAULTS.update(p4_guard_snap=0.0)  # b444
+FLOATS |= {'p4_guard_snap'}
+FLOATS |= {'p4_ge_s8_step', 'p4_ge_s16_step'}
 DEFAULTS.update(p4_skin_far_depth=0.0, p4_skin_far_keep=30, p4_skin_far_bones=8, p4_inst_batch=1,
                 p4_inst_batch_vertices=64, p4_inst_batch_min=4, p4_far_proxy=300, p4_far_proxy_min_vertices=100,
                 p4_static_list=1, p4_static_list_check=0, p4_static_list_budget=4 << 20, p4_static_mesh_lists=1,
-                p4_skin_list=1, p4_batch_stats=0, p4_anim_tracks=0, p4_anim_tracks_budget=1 << 20, p4_anim_tracks_reserve=3 << 19)
+                p4_skin_list=1, p4_batch_stats=0, p4_anim_tracks=1, p4_anim_tracks_budget=1 << 20, p4_anim_tracks_reserve=3 << 19)
 
 
 def main():
@@ -53,6 +66,7 @@ def main():
     ap.add_argument('--preview', action='store_true', help='screenshot only, no timing windows')
     ap.add_argument('--samples', type=int, default=3)
     ap.add_argument('--old-build', action='store_true', help='measure an earlier build: its symbols come from its own ELF')
+    ap.add_argument('--build-dir', help='the running build\'s folder (p4.elf, manifest.json) when build/psplink_bNNN is not it')
     args = ap.parse_args()
     if args.preview and not args.shot:
         ap.error('--preview requires --shot')
@@ -66,7 +80,11 @@ def main():
     if not boots or int(boots[-1]) < 85:
         raise SystemExit('No supported confirmed diagnostic boot')
     build_number = int(boots[-1])
-    build = ROOT / f'build/psplink_b{build_number}'
+    build = Path(args.build_dir) if args.build_dir else ROOT / f'build/psplink_b{build_number}'
+    # Two agents share build numbers: refuse an ELF whose PRX is not the one deployed through host0.
+    deployed = Path(f'C:/temp/p3f-psplink/b{build_number}/p4.prx')
+    if deployed.is_file() and (build / 'p4.prx').is_file() and deployed.read_bytes() != (build / 'p4.prx').read_bytes():
+        raise SystemExit(f'{build}/p4.prx is not the PRX deployed from {deployed}: another build took this number (--build-dir)')
     nm = subprocess.check_output([str(BIN / 'psp-nm.exe'), str(build / 'p4.elf')], text=True)
     symbols = {p[2]: int(p[0], 16) + args.base for p in (line.split() for line in nm.splitlines()) if len(p) == 3}
     manifest = json.loads((build / 'manifest.json').read_text())

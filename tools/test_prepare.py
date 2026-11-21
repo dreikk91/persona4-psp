@@ -35,6 +35,14 @@ class PreparationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 check_path_lengths(temp, 12)
 
+    def test_supported_executables_remain_strict(self):
+        from psp_build import validate_elf
+        for constant in ('RETAIL_SHA1', 'UNDUB_SHA1'):
+            with patch('psp_build.' + constant, hashlib.sha1(b'known').hexdigest()):
+                validate_elf(b'known')
+                with self.assertRaisesRegex(ValueError, 'Unsupported executable'):
+                    validate_elf(b'changed')
+
     def test_recipe_roundtrip_and_wrong_edition(self):
         elf = bytearray(512)
         elf[:6] = b'\x7fELF\x01\x01'

@@ -4,13 +4,12 @@
 #include <math.h>
 
 /* Float UVs become u16 in GE units; colour, normals and positions remain byte-identical. */
-static int static_uv_pack(const void *source, int count, int stride, void *target, float decode[4])
+static int static_uv_params(const void *source, int count, int stride, float decode[4])
 {
     const unsigned char *in = source;
-    unsigned char *out = target;
     float lo[2] = {64,64}, hi[2] = {-64,-64};
     int i, k;
-    if (!source || !target || count <= 0 || count > 65536 || (stride != 24 && stride != 28)) return 0;
+    if (!source || count <= 0 || count > 65536 || (stride != 24 && stride != 28)) return 0;
     for (i = 0; i < count; i++) {
         float uv[2];
         __builtin_memcpy(uv, in + i * stride, sizeof uv);
@@ -27,18 +26,31 @@ static int static_uv_pack(const void *source, int count, int stride, void *targe
         decode[k] = span > 0 ? span * (32768.0f / 32767.0f) : 1;
         decode[k + 2] = lo[k];
     }
-    for (i = 0; i < count; i++) {
+    return 1;
+}
+
+static void static_uv_copy(const void *source, int count, int stride, void *target, const float decode[4])
+{
+    const unsigned char *in = source;
+    unsigned char *out = target;
+    for (int i = 0; i < count; i++) {
         float uv[2];
         unsigned short packed[2];
         __builtin_memcpy(uv, in + i * stride, sizeof uv);
-        for (k = 0; k < 2; k++) {
-            float q = (uv[k] - lo[k]) * (32768.0f / decode[k]);
+        for (int k = 0; k < 2; k++) {
+            float q = (uv[k] - decode[k + 2]) * (32768.0f / decode[k]);
             int rounded = (int)(q + 0.5f);
             packed[k] = rounded < 0 ? 0 : rounded > 32767 ? 32767 : rounded;
         }
         __builtin_memcpy(out + i * (stride - 4), packed, sizeof packed);
         __builtin_memcpy(out + i * (stride - 4) + 4, in + i * stride + 8, stride - 8);
     }
+}
+
+static int static_uv_pack(const void *source, int count, int stride, void *target, float decode[4])
+{
+    if (!target || !static_uv_params(source, count, stride, decode)) return 0;
+    static_uv_copy(source, count, stride, target, decode);
     return 1;
 }
 

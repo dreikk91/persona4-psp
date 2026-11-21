@@ -23,16 +23,22 @@ import zipfile
 UPSTREAM_COMMIT = '363eab8a966d60a9773b45f330f2344329ec4f0a'
 UPSTREAM_URL = f'https://codeload.github.com/Raikaru/Persona4-Decompilation/zip/{UPSTREAM_COMMIT}'
 RETAIL_SHA1 = '4eeec0360cf2715535d9f7e52eb69d786fb0158c'
+UNDUB_SHA1 = 'e4b3fac598b1d85906d53389dd38baf9b7375ea1'
+
+def validate_elf(elf):
+    if hashlib.sha1(elf).hexdigest() not in (RETAIL_SHA1, UNDUB_SHA1):
+        raise ValueError('Unsupported executable. Use Persona 4 USA or the supported USA UNDUB ISO.')
+
 BUILD_TOOLS = ('psp_census', 'psp_vu0', 'psp_data_census', 'psp_make_data',
                'psp_ptr_proof', 'psp_xref', 'psp_link', 'psp_link_census',
                'psp_reasm', 'psp_address_audit', 'psp_hw_debug', 'psp_build',
-               'psp_prepare', 'extract_elf', 'psp_strips', 'psp_disc')
+               'psp_prepare', 'extract_elf', 'psp_strips', 'psp_clut', 'psp_disc')
 WORKER_SCRIPTS = {'psp_census.py', 'psp_ptr_proof.py', 'psp_link.py',
-                  'psp_make_data.py', 'psp_address_audit.py', 'psp_hw_debug.py', 'psp_strips.py'}
+                  'psp_make_data.py', 'psp_address_audit.py', 'psp_hw_debug.py', 'psp_strips.py', 'psp_clut.py'}
 TOOLS = ('psp-gcc', 'psp-nm', 'psp-as', 'psp-ld', 'psp-objcopy', 'psp-objdump',
          'psp-size', 'psp-strip', 'psp-fixup-imports', 'psp-prxgen', 'mksfoex', 'pack-pbp')
 ARTIFACTS = {'EBOOT.PBP', 'p4.prx', 'p4.elf', 'p4data.bin', 'p4str.bin'}
-OPTIONAL_ARTIFACTS = {'p4strips.bin'}
+OPTIONAL_ARTIFACTS = {'p4strips.bin', 'p4clut.bin'}
 # Hash of canonical paths and file contents, independent of ZIP packaging.
 UPSTREAM_TREE_SHA256 = 'b1a5681e7b30280b558c2deb438b2815b414eee4e6a59da55e551778ead45bc0'
 _cancelled = threading.Event()
@@ -128,7 +134,8 @@ def clean_cache(cache=None, include_downloads=False):
             if builds.resolve() != builds or builds.is_symlink():
                 raise ValueError('Refusing to clean a redirected cache directory.')
             for job in builds.iterdir():
-                if not re.fullmatch('[0-9a-f]{64}', job.name) or not job.is_dir() or job.resolve() != job:
+                # 16 hex since 03a2c2a (short paths), 64 in caches made before it
+                if not re.fullmatch('[0-9a-f]{16}|[0-9a-f]{64}', job.name) or not job.is_dir() or job.resolve() != job:
                     raise ValueError('Unknown or redirected build entry. No cache jobs were removed.')
                 if not job.resolve().is_relative_to(root):
                     raise ValueError('Refusing to clean outside the selected cache.')
@@ -514,8 +521,7 @@ def _build_eboot(iso, bundle, pspdev=None, cache=None, archive=None):
     # The extraction helper reads the disc and never writes into the bundle.
     from extract_elf import extract
     elf = extract(iso)
-    if hashlib.sha1(elf).hexdigest() != RETAIL_SHA1:
-        raise ValueError('Unsupported executable. Use the original Persona 4 USA ISO.')
+    validate_elf(elf)
     try:
         compiler = find_pspdev(bundle, pspdev)
     except ValueError:
@@ -570,8 +576,9 @@ def _build_eboot(iso, bundle, pspdev=None, cache=None, archive=None):
             run_stage(workspace, 'psp_link.py', [], env, log)
             # b389: the character strip pack from the player's ISO (78 -> 68 ms a frame in the b366 PSP audit);
             # psp_hw_debug puts it in the release next to the EBOOT.
-            run_stage(workspace, 'psp_strips.py', ['--iso', iso], env, log)
-            run_stage(workspace, 'psp_hw_debug.py', ['--release', '--out', release], env, log)
+            run_stage(workspace, 'psp_strips.py', ['--iso', iso, '--static'], env, log)
+            run_stage(workspace, 'psp_clut.py', ['--iso', iso], env, log)
+            run_stage(workspace, 'psp_hw_debug.py', ['--release', '--asset-packs', workspace / 'build/psp_dist/PSP/GAME/P4', '--out', release], env, log)
         manifest = validate_result(release, config['build'])
         record_verification(release, config, manifest, toolchain)
         save_json(job / 'build_identity.json', identity)

@@ -1,5 +1,56 @@
 # Changelog
 
+## b450 pre-release (2026-11-21)
+
+Source-build utility and port changes since b388. Hardware results below come from the named diagnostic builds at 333 MHz; the b450 XMB executable needs its own gameplay validation. A smaller buffer or faster CPU section does not imply an FPS gain.
+
+### Changes retained
+
+| Builds | Change | Evidence / result |
+|---|---|---|
+| b389 | Whole-block texture swizzling, one flush per mip chain, allocation rollback | Adapted from MeMeNT0xMoRii/persona4-portable; avoids partial raster allocation on failure. |
+| b390-b411 | Weight-group skin batches, flat vertex streams, compact vertex colours; static lists in render targets | Current rendering paths; scene coverage and benefit vary. No release-wide FPS claim. |
+| b405 | PSP Go launch/storage handling; Rush/Stop bar placement | Fork adaptations retain attribution in source. |
+| b424-b427 | MPEG firmware library allocated below 0x0A000000; source release linker fixed | Address-placement mitigation; movie hangs recurred in b433, so this is not a confirmed general fix. |
+| b436-b445 | GE-native static lists: compact s16/s8 positions, strips, bounding boxes and uniform-colour handling | Heaven PSP: list data 2.65 -> 1.62 MB, picture unchanged; CPU unchanged. Enabled. |
+| b439 | Static list keys use only the generations of rasters actually bound | Stops unrelated font texture updates from rebuilding room lists; prior dialogue rebuild spikes reached 445 ms. |
+| b446 | Atomic rendering hot code grouped together | PSP: atomic instruction misses 17.6k -> 15.6k, about 0.4 ms saved in that section; total frame misses unchanged. |
+| b448-b449 | 2D state cache enabled, texture-only path and miss diagnostics | Heaven result within noise; dialogue coverage still needs measurement. |
+| b450 | Optional direct sprite/glyph state and GE strip path | Default off (`p4_ui_native=0`); requires PSP image/time A/B. |
+
+### Short PSP FPS results
+
+Recorded hardware comparison from the b390-b400 optimization session (333 MHz, profiler off); this is historical evidence, not a fresh b388-to-b450 A/B.
+
+| Scene | Before | After (b400) |
+|---|---:|---:|
+| Entrance | ~15 FPS | ~23 FPS |
+| Junes West Entrance | ~15 FPS | ~23 FPS |
+| Heaven, 10th Paradise | ~15 FPS | Not confirmed |
+
+The earlier Paradise 30 FPS report was withdrawn after the test scene was identified as Junes.
+
+### Experiments that did not justify enabling
+
+- Guard disabled: about 42 versus 51 ms CPU while running in Heaven, but cloud smearing and battle floor holes. Kept enabled.
+- Long-edge subdivision: clouds improved in one route, but battle geometry grew from 8.4k to 164k triangles, reached 7.5 FPS and exhausted the list/heap budget. Experimental splitting remains off.
+- Static chunks, gate lists and guard snapping: no useful measured gain on the tested route; off.
+- Constant-pose animation shortcut: no gain in field 63, slower; removed.
+- Offline static strips and CLUT packs: very little coverage in Heaven (22 static hits, one texture), no measured frame gain. Their consumers remain off.
+
+### Preparation utility
+
+- Accept the original USA ELF and the tested USA UNDUB ELF by full SHA-1. Unknown executable modifications remain rejected. The selected disc supplies its own voice/movie/container data; installations from different ISOs must use separate output folders.
+- Generate both skin and static mesh strips (`p4strips.bin`) and offline texture palettes/indices (`p4clut.bin`) from that ISO. Include the converter sources, frozen Pillow runtime and license, verify both pack hashes, and install them alongside EBOOT in both build-only and full preparation.
+- Compact static GE command lists still compile at runtime. The standalone LOD producer has no runtime consumer in b450 and is not part of automatic preparation.
+- Source snapshot and utility omit external checkouts, other-game decompilation sources/research notes, game assets and generated executables. Retain fork credits in README, notices and source.
+
+### Validation and limitations
+
+See [b450 validation](docs/build_validation_b450.md) for the actual frozen-package checks. Selected older hardware measurements are in [the b366 audit](docs/hardware_b366.md). Movie hangs, heap fragmentation after scene changes, fusion glow flicker and slower heavy scenes remain open. No complete playthrough or stable whole-game 30 FPS is claimed.
+
+## Earlier b354-b388 release
+
 Builds b354-b388 (branch `perf/offline-mesh`, merged into `main` on 2026-11-18), published as the b388 pre-release.
 Each entry lists what was tried and what it gave. "PSP" means a real PSP at 333 MHz
 with the profiler off. "PPSSPP" figures are emulated cycles: they show where the work is,
@@ -62,6 +113,6 @@ not how long it takes on a device. The test scene is the Margaret dialogue
 
 - [docs/hardware_b366.md](docs/hardware_b366.md): the b366 PSP audit (34 arms, 13,056 frames).
 - [docs/cpu_live_b366.md](docs/cpu_live_b366.md): live CPU capture.
-- [docs/crisis_core_animation_cost.md](docs/crisis_core_animation_cost.md): a lighter pose path modelled on Crisis Core.
+- [docs/animation_psp.md](docs/animation_psp.md): P4 animation costs and pose-path measurements.
 - [docs/runtime_controls_b366.md](docs/runtime_controls_b366.md): all 230 runtime switches (translated to English).
 - [docs/ge_frame.md](docs/ge_frame.md), [docs/visual_issues.md](docs/visual_issues.md): GE frame and fixed visual issues.

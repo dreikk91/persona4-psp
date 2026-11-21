@@ -15,7 +15,7 @@ PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
 PSP_HEAP_SIZE_KB(-1); /* the heap is claimed before main */
 PSP_HEAP_THRESHOLD_SIZE_KB(4096); /* left free: thread stacks */
 
-#define BUILD 388
+#define BUILD 450
 #define P4_IMAGE_SIZE 0x40B000 /* retail 0x52da00..0x938a00: data and bss */
 #include "paths.h"
 #define GAME_DIR "ms0:/PSP/GAME/P4/" /* only until p4_paths_init: the log before it */
@@ -534,7 +534,20 @@ static int load(const char *path, void *dst, int max)
     SceUID fd = sceIoOpen(path, PSP_O_RDONLY, 0);
     if (fd < 0)
         return fd;
-    int n = sceIoRead(fd, dst, max);
+    /* the whole file, in as many reads as it takes (a read may return less, e.g. from the PSP Go's internal storage;
+       from the persona4-portable fork, 2ad48b3); a file larger than max is refused */
+    SceOff length = sceIoLseek(fd, 0, PSP_SEEK_END);
+    int n = 0;
+    if (length <= 0 || length > max || sceIoLseek(fd, 0, PSP_SEEK_SET) != 0)
+        n = -1;
+    while (n >= 0 && n < length) {
+        int chunk = sceIoRead(fd, (char *)dst + n, (int)length - n);
+        if (chunk <= 0) {
+            n = -1;
+            break;
+        }
+        n += chunk;
+    }
     sceIoClose(fd);
     return n;
 }
@@ -545,6 +558,13 @@ static int check_strings(const unsigned *list, int count)
     const unsigned end = P4_IMAGE + P4_IMAGE_SIZE;
     int bad = 0, first_bad = -1;
     for (int i = 0; i < count; i++) {
+        /* a p4str.bin from another build may point outside the image (persona4-portable 2ad48b3) */
+        if ((list[i] & 3) || list[i] > P4_IMAGE_SIZE - sizeof(unsigned)) {
+            if (first_bad < 0)
+                first_bad = (int)(0x52DA00 + list[i]);
+            bad++;
+            continue;
+        }
         unsigned p = *(unsigned *)(P4_IMAGE + list[i]);
         const unsigned char *s = (const unsigned char *)p;
         /* s[-1] may be the top byte of a rebased pointer that sits right before the text */
@@ -621,6 +641,32 @@ int main(int argc, char **argv)
         SceIoStat st;
         p4_fps_overlay = sceIoGetstat(p4_path("FPS"), &st) >= 0;
     }
+    { /* b410: an empty ANIMTRACE file next to the EBOOT turns the animation trace on (skin.h, mode 3), into the log */
+        extern int p4_anim_trace;
+        SceIoStat st;
+        if (sceIoGetstat(p4_path("ANIMTRACE"), &st) >= 0) {
+            p4_anim_trace = 3;
+            p4_log("ANIMTRACE: animation trace on (clip changes, backward times, poses after each change)\n");
+        }
+    }
+    { /* b424: an empty FLATALL file next to the EBOOT turns on p4_flat_all (b419, indexed draws drawn from flat copies),
+         for a device A/B without PSPLink */
+        extern int p4_flat_all;
+        SceIoStat st;
+        p4_flat_all = sceIoGetstat(p4_path("FLATALL"), &st) >= 0;
+        p4_log("switch files: FLATALL %d\n", p4_flat_all);
+    }
+#ifdef P4_HW_PROFILE
+    { /* b423: an empty PROFCLOCK file next to the hwdbg EBOOT: section profile by the system clock and the model census,
+         for a device run without PSPLink (on the PSP the clock is real time: cache and bus stalls included) */
+        extern int p4_prof_clock, p4_model_census;
+        SceIoStat st;
+        if (sceIoGetstat(p4_path("PROFCLOCK"), &st) >= 0) {
+            p4_prof_clock = p4_model_census = 1;
+            p4_log("PROFCLOCK: clock profile and model census on\n");
+        }
+    }
+#endif
 #ifdef P4_HW_PROFILE
     extern char p4_image[];
     if ((unsigned)p4_image != P4_IMAGE) {
@@ -633,6 +679,7 @@ int main(int argc, char **argv)
     void *got = (void *)P4_IMAGE;
     unsigned stack = (unsigned)__builtin_frame_address(0);
     p4_log("P4 boot free=%d KB maxfree=%d KB stack=%x\n", (int)sceKernelTotalFreeMemSize() / 1024, (int)sceKernelMaxFreeMemSize() / 1024, stack);
+    { extern unsigned p4_video_low_hole(void); p4_log("P4 low hole for the MPEG library at %x\n", p4_video_low_hole()); } /* b1402 */
     if (stack < 0x0A000000u) { /* the main stack sits at the top of the partition: this is the 24 MB one */
         p4_log("Extra memory is off. Enable the custom firmware's extra memory setting and check the memory stick.\n");
         p4_log("The PSP-1000 has no extra memory and is not supported.\n");

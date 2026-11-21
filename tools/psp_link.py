@@ -73,7 +73,22 @@ def library_names():
     return found
 
 
+# Retail data the decomp's GP name points at wrongly (from the persona4-portable fork, 1d0ceec): both Rush/Stop
+# loads in SLUS-21782 (0x2117a4, 0x2118bc) read 420.5 at 0x7615a0; fGpffff84a0 spells 16 bytes below it, where the
+# float is -pi/4, so the Rush/Stop bar sat at the wrong height.
+VERIFIED_GP_ADDRESSES = {"fGpffff84a0": 0x7615a0}
+
+
+def correct_retail_data_symbols(script):
+    """Refresh the verified GP aliases in a symbols.ld made earlier (psp_hw_debug reuses the census's)."""
+    for name, address in VERIFIED_GP_ADDRESSES.items():
+        script = re.sub(rf"^{name} = 0x[0-9a-fA-F]+;$", f"{name} = {address + K:#x};", script, flags=re.M)
+    return script
+
+
 def retail_address(name, names, gp):
+    if name in VERIFIED_GP_ADDRESSES:
+        return VERIFIED_GP_ADDRESSES[name]
     m = GP_NAME.match(name)
     if m:
         offset = int(m[1], 16)
@@ -184,7 +199,7 @@ def main():
     rsp.write_text("\n".join('"' + p.as_posix() + '"' for p in objects) + "\n", encoding="utf-8")
     elf = OUT / "p4.elf"
     # ponytail: two CRI generations define the same names, first object wins; drop one set when audio lands.
-    run(BIN / "psp-gcc.exe", "-G0", f"-L{SDK / 'lib'}", "-Wl,-zmax-page-size=128", "-Wl,--allow-multiple-definition", "-Wl,--wrap=sdkSpriteRequestLoad", "-Wl,--wrap=sceGuGetMemory", "-Wl,--wrap=sceGuDrawArray", "-Wl,--wrap=sceGeListUpdateStallAddr", "-Wl,--wrap=func_00397c40", *(f"-Wl,--wrap={f}" for f in ("malloc", "calloc", "realloc", "memalign", "free")),f"-Wl,-T,{(OUT / 'image.ld').as_posix()}",
+    run(BIN / "psp-gcc.exe", "-G0", f"-L{SDK / 'lib'}", "-Wl,-zmax-page-size=128", "-Wl,--allow-multiple-definition", "-Wl,--wrap=sdkSpriteRequestLoad", "-Wl,--wrap=sceGuGetMemory", "-Wl,--wrap=sceGuDrawArray", "-Wl,--wrap=sceGeListUpdateStallAddr", "-Wl,--wrap=func_00397c40", "-Wl,--wrap=sceKernelSleepThread", *(f"-Wl,--wrap={f}" for f in ("malloc", "calloc", "realloc", "memalign", "free")),f"-Wl,-T,{(OUT / 'image.ld').as_posix()}",
         *port_objects, OUT / "stubs.o", OUT / "reasm.o", f"@{rsp.as_posix()}", OUT / "symbols.ld", *LIB_FLAGS, "-o", elf)
     run(BIN / "psp-fixup-imports.exe", elf)
     check_import_ranges(elf)

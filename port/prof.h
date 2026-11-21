@@ -10,7 +10,9 @@ enum { PROF_FRAME, PROF_ATOMIC, PROF_MESH, PROF_GUARD, PROF_SKIN, PROF_PTANK, PR
       PROF_AFRAME, PROF_AATTACH, PROF_ALAYER, PROF_ACTRL, PROF_AFX, PROF_AMOTION,
       PROF_ABLEND, PROF_AREBASE, PROF_APOSE, PROF_KADD, PROF_KSET, PROF_KBLEND, PROF_KMAT, PROF_KANIM, PROF_KFRAME, PROF_KINTERP, PROF_TBIND, PROF_LBIND,
       PROF_DSTATE, PROF_DSKIP, PROF_DPOSE, PROF_DRESTORE, PROF_DCOLOR, PROF_DVIS, PROF_DFX, PROF_DFRAME,
-      PROF_RPLAY, PROF_RLIGHT, PROF_RGUARD, PROF_FSYNC, PROF_FTRANS, PROF_ASCALE, PROF_AHANDLE, PROF_ACHILD, PROF_AADV, PROF_QFX, PROF_AENV, PROF_AIB, PROF_AFP, PROF_ASL, PROF_SECTIONS };
+      PROF_RPLAY, PROF_RLIGHT, PROF_RGUARD, PROF_FSYNC, PROF_FTRANS, PROF_ASCALE, PROF_AHANDLE, PROF_ACHILD, PROF_AADV, PROF_QFX, PROF_AENV, PROF_AIB, PROF_AFP, PROF_ASL,
+      PROF_2STATE, PROF_2VERT, PROF_2FIN, PROF_2FLUSH,
+      PROF_LFIND, PROF_LSTATE, PROF_LMAT, PROF_LBITS, PROF_LLIGHT, PROF_LTEX, PROF_LCALL, PROF_SECTIONS }; /* b1398: inside 2d; b445: inside asl */
 enum { PC_COUNT = 5 };
 /* counter words read per section edge: cpu cycles, stall, memory stall, imiss, dmiss (b73 read all 19, which itself
    cost a visible part of the frame at ~800 section edges a frame) */
@@ -26,7 +28,8 @@ static const char *const prof_names[PROF_SECTIONS] = { "frame", "atomic", "mesh"
     "qmodel", "qattach", "qsort", "qeffect", "qfld", "qprim",
     "aframe", "aattach", "alayer", "actrl", "afx", "amotion",
     "ablend", "arebase", "apose", "kadd", "kset", "kblend", "kmat", "kanim", "kframe", "kinterp", "tbind", "lbind",
-    "dstate", "dskip", "dpose", "drestore", "dcolor", "dvis", "dfx", "dframe", "rplay", "rlight", "rguard", "fsync", "ftrans", "ascale", "ahandle", "achild", "aadv", "qfx", "aenv", "aib", "afp", "asl" };
+    "dstate", "dskip", "dpose", "drestore", "dcolor", "dvis", "dfx", "dframe", "rplay", "rlight", "rguard", "fsync", "ftrans", "ascale", "ahandle", "achild", "aadv", "qfx", "aenv", "aib", "afp", "asl", "2state", "2vert", "2fin", "2flush",
+    "lfind", "lstate", "lmat", "lbits", "llight", "ltex", "lcall" };
 static const volatile unsigned *prof_regs;
 static int prof_state; /* 0 not tried, 1 live, -1 none */
 static unsigned prof_at[PROF_SECTIONS][PC_COUNT], prof_depth[PROF_SECTIONS], prof_calls[PROF_SECTIONS];
@@ -268,7 +271,101 @@ static void ot_report(unsigned frames)
 #define P4_WRAP_VOID(name, section, params, args) \
     void __real_##name params; \
     void __wrap_##name params { prof_begin(section); __real_##name args; prof_end(section); }
-P4_WRAP_VOID(mdlQueueModelForDraw, PROF_QMODEL, (void *queue, void *model), (queue, model))
+/* b415 p4_model_census (poke): the models queued for drawing (mdlQueueModelForDraw, which advances each one) by
+   type and id (MdlFileModel +0xD4/+0xD6): calls a tick and the time in them, every 256 ticks. Field 63 room 1:
+   ~520 queued models a drawn frame, mdlAdvanceModel 22 M cycles, with a narrow corridor on screen. */
+int p4_model_census = 0;
+static unsigned mc_now = ~0u, mc_pose_upd, mc_pose_same, mc_pose_shared, mc_last_key = ~0u, mc_last_hash;
+extern unsigned p4_anim_tick;
+enum { MC_KEYS = 96 };
+static struct { unsigned key, calls, us; const void *last; unsigned models, upd, same, shared, unseen, unseen_us; } mc_key[MC_KEYS];
+static unsigned drawn_tick_of(const void *root); /* rwsky.c, b425 */
+/* b422 (with p4_prof_clock or the thread profiler): the profiler sections inside a queued model, by model key */
+static const unsigned char mc_sec[] = { PROF_AFRAME, PROF_AATTACH, PROF_ALAYER, PROF_ACTRL, PROF_AFX, PROF_AMOTION, PROF_ABLEND,
+    PROF_AREBASE, PROF_APOSE, PROF_KADD, PROF_KSET, PROF_KMAT, PROF_KINTERP, PROF_KFRAME, PROF_DSTATE, PROF_DPOSE, PROF_DVIS,
+    PROF_DFX, PROF_DFRAME, PROF_FTRANS, PROF_ASCALE, PROF_AHANDLE, PROF_ACHILD, PROF_AADV, PROF_QATTACH, PROF_QEFFECT, PROF_QFX };
+enum { MC_SECS = sizeof mc_sec };
+static unsigned mc_cyc[MC_KEYS][MC_SECS];
+static unsigned mc_tick0, mc_other;
+void __real_mdlQueueModelForDraw(void *queue, void *model);
+void __wrap_mdlQueueModelForDraw(void *queue, void *model)
+{
+    if (!p4_model_census || !model) {
+        prof_begin(PROF_QMODEL);
+        __real_mdlQueueModelForDraw(queue, model);
+        prof_end(PROF_QMODEL);
+        return;
+    }
+    unsigned key = (unsigned)*(const unsigned short *)((const char *)model + 0xD4) << 16 | *(const unsigned short *)((const char *)model + 0xD6);
+    unsigned upd0 = mc_pose_upd, same0 = mc_pose_same, shared0 = mc_pose_shared, sec0[MC_SECS];
+    for (int k = 0; k < MC_SECS; k++)
+        sec0[k] = (unsigned)prof_sum[mc_sec[k]][0];
+    mc_now = key;
+    unsigned t0 = sceKernelGetSystemTimeLow();
+    prof_begin(PROF_QMODEL);
+    __real_mdlQueueModelForDraw(queue, model);
+    prof_end(PROF_QMODEL);
+    unsigned us = sceKernelGetSystemTimeLow() - t0;
+    mc_now = ~0u;
+    int i = 0;
+    while (i < MC_KEYS && mc_key[i].calls && mc_key[i].key != key)
+        i++;
+    if (i == MC_KEYS)
+        mc_other++;
+    else {
+        if (!mc_key[i].calls)
+            mc_key[i].key = key;
+        mc_key[i].calls++, mc_key[i].us += us;
+        { /* b425: not drawn on screen in the last 3 ticks (frameskip leaves at most 2 in a row undrawn) */
+            const char *clump = *(const char **)((const char *)model + 0xdc), *frame = clump ? *(const char **)(clump + 4) : 0;
+            const void *root = frame ? *(const void **)(frame + 160) : 0;
+            if (root && p4_anim_tick - drawn_tick_of(root) > 3)
+                mc_key[i].unseen++, mc_key[i].unseen_us += us;
+        }
+        for (int k = 0; k < MC_SECS; k++)
+            mc_cyc[i][k] += (unsigned)prof_sum[mc_sec[k]][0] - sec0[k];
+        mc_key[i].upd += mc_pose_upd - upd0, mc_key[i].same += mc_pose_same - same0, mc_key[i].shared += mc_pose_shared - shared0;
+        if (mc_key[i].last < (const void *)model) /* distinct models: counted while they come in rising order */
+            mc_key[i].models++;
+        mc_key[i].last = model;
+    }
+    if (!mc_tick0)
+        mc_tick0 = p4_anim_tick;
+    unsigned ticks = p4_anim_tick - mc_tick0;
+    if (ticks >= 256) {
+        unsigned all = 0, all_us = 0;
+        for (int k = 0; k < MC_KEYS && mc_key[k].calls; k++)
+            all += mc_key[k].calls, all_us += mc_key[k].us;
+        p4_log("model census per tick over %u ticks: %u queued, %u us; other keys %u\n", ticks, all / ticks, all_us / ticks, mc_other);
+        for (int n = 0; n < 12; n++) { /* the 12 costliest */
+            int best = -1;
+            for (int k = 0; k < MC_KEYS && mc_key[k].calls; k++)
+                if (mc_key[k].us != ~0u && (best < 0 || mc_key[k].us > mc_key[best].us))
+                    best = k;
+            if (best < 0)
+                break;
+            p4_log("model census type %u id %u: %u.%02u a tick, %u us a tick (%u us each), runs %u; pose updates %u unchanged %u as the previous copy %u; unseen %u.%02u a tick (%u us a tick)\n", mc_key[best].key >> 16, mc_key[best].key & 0xffff,
+                   mc_key[best].calls / ticks, mc_key[best].calls * 100 / ticks % 100, mc_key[best].us / ticks, mc_key[best].us / mc_key[best].calls,
+                   mc_key[best].models, mc_key[best].upd, mc_key[best].same, mc_key[best].shared,
+                   mc_key[best].unseen / ticks, mc_key[best].unseen * 100 / ticks % 100, mc_key[best].unseen_us / ticks);
+            if (n < 4) { /* the costliest four: their sections, us each */
+                char line[256];
+                int at = 0;
+                for (int k = 0; k < MC_SECS && at < 220; k++) {
+                    unsigned us = mc_cyc[best][k] / 333u / mc_key[best].calls;
+                    if (us)
+                        at += snprintf(line + at, sizeof line - at, " %s %u", prof_names[mc_sec[k]], us);
+                }
+                line[at] = 0;
+                p4_log("model census sections type %u id %u (us each):%s\n", mc_key[best].key >> 16, mc_key[best].key & 0xffff, line);
+            }
+            mc_key[best].us = ~0u;
+        }
+        memset(mc_key, 0, sizeof mc_key);
+        memset(mc_cyc, 0, sizeof mc_cyc);
+        mc_other = 0, mc_tick0 = p4_anim_tick;
+    }
+}
 P4_WRAP(int, mdlComputeIndexedAttachMatrix, PROF_QATTACH, (void *model, int index, void *destination), (model, index, destination))
 P4_WRAP_VOID(qsort, PROF_QSORT, (void *base, unsigned count, unsigned size, int (*compare)(const void *, const void *)), (base, count, size, compare))
 P4_WRAP_VOID(mdlEffectFlushWithTable, PROF_QEFFECT, (void *table, void *effect), (table, effect))
@@ -317,6 +414,35 @@ int __wrap_func_003d5840(void *interpolator, void *animation) { prof_begin(PROF_
 int __real_func_00397c40(void *hierarchy);
 unsigned kmat_nodes, kmat_flags_or;
 int p4_hanim_dispatch(unsigned *h, int (*original)(void *));
+/* b420 (p4_model_census): does a hierarchy's pose change from one update to the next? A hash of its matrices after
+   each update, against the last one of the same hierarchy; summed by the model being queued (mc_now). */
+enum { MC_POSES = 1024 };
+static struct { const void *h; unsigned hash; } mc_pose[MC_POSES];
+static void mc_pose_note(const void *hierarchy)
+{
+    /* the local pose: the interpolator's frames (36 frame size, 76 first frame), not the world matrices */
+    int n = ((const int *)hierarchy)[1];
+    const char *interp = ((const char *const *)hierarchy)[8];
+    if (!interp || n <= 0 || n > 256)
+        return;
+    int size = ((const int *)interp)[9];
+    if (size <= 0 || size > 256 || size & 3)
+        return;
+    const unsigned *m = (const unsigned *)(interp + 76);
+    unsigned hash = 2166136261u;
+    for (int i = 0; i < n * size / 4; i++)
+        hash = (hash ^ m[i]) * 16777619u;
+    unsigned slot = ((unsigned)hierarchy >> 4) * 2654435761u >> 22; /* 10 bits */
+    for (int k = 0; k < 8; k++, slot = (slot + 1) & (MC_POSES - 1))
+        if (mc_pose[slot].h == hierarchy || !mc_pose[slot].h) {
+            int same = mc_pose[slot].h == hierarchy && mc_pose[slot].hash == hash;
+            mc_pose[slot].h = hierarchy, mc_pose[slot].hash = hash;
+            mc_pose_upd++, mc_pose_same += same;
+            mc_pose_shared += mc_last_key == mc_now && mc_last_hash == hash; /* the same pose as the copy before it */
+            mc_last_key = mc_now, mc_last_hash = hash;
+            return;
+        }
+}
 int __wrap_func_00397c40(void *hierarchy)
 {
     kmat_nodes += ((int *)hierarchy)[1];
@@ -324,6 +450,8 @@ int __wrap_func_00397c40(void *hierarchy)
     prof_begin(PROF_KMAT);
     int r = p4_hanim_dispatch(hierarchy, __real_func_00397c40);
     prof_end(PROF_KMAT);
+    if (mc_now != ~0u)
+        mc_pose_note(hierarchy);
     return r;
 }
 /* b263: RenderWare's frame sync (_rwFrameSyncDirty, called by RwCameraBeginUpdate: every dirty root's whole frame

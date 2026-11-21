@@ -2,12 +2,12 @@
 
 ## Source-build Windows utility
 
-The current utility builds **EBOOT.PBP on your PC**, then prepares resources from your original Persona 4 USA (`SLUS-21782`) ISO. New preparation packages contain our port sources and conversion tools. They contain **no prebuilt game EBOOT, compiled game objects, retail executable, rebased game data or build-specific numerical data recipe**. The pinned upstream decompilation is fetched separately.
+The current utility builds **EBOOT.PBP on your PC**, then prepares resources from your Persona 4 USA or supported USA UNDUB (`SLUS-21782`) ISO. New preparation packages contain our port sources and conversion tools. They contain **no prebuilt game EBOOT, compiled game objects, retail executable, rebased game data or build-specific numerical data recipe**. The pinned upstream decompilation is fetched separately.
 
-The older prebuilt-EBOOT b164 download has been withdrawn. The current source-build package is published as **P4-PSP-b249-windows-x64.zip** in the [b249 pre-release](https://github.com/dreikk91/persona4-psp/releases/tag/b249); creating a package locally does not publish it.
+The older prebuilt-EBOOT b164 download has been withdrawn. The current source-build package is published as **P4-PSP-b450-windows-x64.zip** in the [b450 pre-release](https://github.com/dreikk91/persona4-psp/releases/tag/b450); creating a package locally does not publish it.
 
 1. Extract the complete new utility archive to a PC folder. Keep `Prepare P4.exe`, `_internal`, `helpers`, `source`, `prepare.json` and any included `toolchain` folder together.
-2. Run **Prepare P4.exe** and select your original USA ISO and an output folder outside the utility folder.
+2. Run **Prepare P4.exe** and select your USA or supported USA UNDUB ISO and an output folder outside the utility folder.
 3. Click **Build and prepare**. The utility downloads the PSP compiler on the first build (about 100 MB, verified by SHA256, kept in the build cache), verifies the disc, obtains the pinned upstream sources, compiles the game and port, checks the linked image, packages EBOOT and prepares all audio/movies.
 4. Wait for **Ready**, then copy the resulting **P4** folder to **PSP/GAME/** on your memory card. Start the game from XMB.
 
@@ -15,7 +15,7 @@ No separate Python, Git, FFmpeg, PSPLink or PSPDEV installation is required by t
 
 The first source download requires Internet access. Later builds can reuse the SHA256-verified archive. The revision is pinned to `363eab8a966d60a9773b45f330f2344329ec4f0a`. An independently obtained ZIP with the expected SHA256 can be supplied through `--upstream-archive` for offline use (this also works when opening the GUI from a command line). Read the upstream license/provenance notices before redistributing material.
 
-Use a local PC disk for preparation and build caching. Reserve at least the ISO size plus 4 GiB for resources, plus space for source/compiler workspaces. Preparation decodes over 17,000 streams and converts all 23 movies. The original ISO is read only. Other regions, modified executables and compressed images are not supported. A homebrew-capable PSP with 64 MB RAM is required; PSP-1000 support is not established.
+Use a local PC disk for preparation and build caching. Reserve at least the ISO size plus 4 GiB for resources, plus space for source/compiler workspaces. Preparation decodes over 17,000 streams and converts all 23 movies. The original ISO is read only. The supported USA UNDUB executable has SHA-1 `e4b3fac598b1d85906d53389dd38baf9b7375ea1`; the original USA executable is `4eeec0360cf2715535d9f7e52eb69d786fb0158c`. Other regions, unknown modified executables and compressed images are not supported. Japanese voices and movies come from the selected ISO; do not mix resource folders from different editions. A homebrew-capable PSP with 64 MB RAM is required; PSP-1000 support is not established.
 
 ## Build EBOOT only
 
@@ -26,10 +26,14 @@ P4/
   EBOOT.PBP
   p4data.bin
   p4str.bin
+  p4strips.bin
+  p4clut.bin
   build_manifest.json
 ```
 
-These are matching launch files, **not a complete installation**. Full preparation also creates the disc container parts, `p4files.idx`, `SOUND`, `VIDEO` and `installation.json`. You can rerun the same ISO/output folder with Build EBOOT only disabled to finish resource preparation.
+The utility generates skin and static mesh strips in `p4strips.bin` and texture palettes/indices in `p4clut.bin`, verifies their hashes and installs both beside EBOOT. Skin strips are used by default; optional static strip and offline CLUT consumers remain disabled until separate PSP validation. GE-native compact static lists are currently prepared on the PSP. The standalone LOD generator has no runtime consumer in this release, so the utility does not generate unused LOD data.
+
+These are matching launch files and derived packs, **not a complete installation**. Full preparation also creates the disc container parts, `p4files.idx`, `SOUND`, `VIDEO` and `installation.json`. You can rerun the same ISO/output folder with Build EBOOT only disabled to finish resource preparation.
 
 ## Cache, resuming and errors
 
@@ -56,10 +60,10 @@ Use `Prepare P4.exe` in place of `python tools/psp_prepare.py` when running the 
 
 ```powershell
 python -m pip install -r tools/requirements-prepare.txt
-python tools/psp_prepare_release.py --vgmstream ./helpers/vgmstream --freeze --zip --pspdev ./toolchain/pspdev --out ./build/P4-PSP-b249-windows-x64
+python tools/psp_prepare_release.py --vgmstream ./helpers/vgmstream --freeze --zip --pspdev ./toolchain/pspdev --out ./build/P4-PSP-b450-windows-x64
 ```
 
-Supply the complete Windows vgmstream CLI folder, including DLLs and notices. The generator freezes Python/Tk/PyAV, bundles conversion helpers, copies the port/build sources and writes their SHA256 manifest. `package.json` inventories the distributed files. Packages do not include PSPDEV by default: the utility downloads the archive named in `tools/build_reference.json` (`recommended_toolchain`) and checks its SHA256. `--bundle-toolchain` with `--pspdev` includes a compiler instead; a bundled compiler takes priority over a user's existing `PSPDEV`, and an explicit `--pspdev` overrides both. The copied `BUILDINFO.txt` replaces that compiler's local installation paths with `${PSPDEV}` while retaining its version/source information; the original file is unchanged. Review the exact third-party binaries' corresponding-source requirements before redistribution.
+Supply the complete Windows vgmstream CLI folder, including DLLs and notices. The generator freezes Python/Tk/PyAV/Pillow, bundles conversion helpers, copies the port/build sources and writes their SHA256 manifest. `package.json` inventories the distributed files. Packages do not include PSPDEV by default: the utility downloads the archive named in `tools/build_reference.json` (`recommended_toolchain`) and checks its SHA256. `--bundle-toolchain` with `--pspdev` includes a compiler instead; a bundled compiler takes priority over a user's existing `PSPDEV`, and an explicit `--pspdev` overrides both. The copied `BUILDINFO.txt` replaces that compiler's local installation paths with `${PSPDEV}` while retaining its version/source information; the original file is unchanged. Review the exact third-party binaries' corresponding-source requirements before redistribution.
 
 Static `.a` / `.la` files in the compiler's `lib/bfd-plugins` directory are omitted: Windows BFD tools try to load them as DLLs and can stop with a Bad Image dialog. Target libraries elsewhere and actual DLL plugins are preserved.
 

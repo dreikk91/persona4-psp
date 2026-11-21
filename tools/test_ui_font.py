@@ -61,7 +61,8 @@ static int submit(int p,void *v,int n) {
 }
 static void (*D_00887300[])(unsigned,unsigned)={state};
 static int (*D_00887310[])(int,void *,int)={submit};
-int p4_ui_font, p4_ui_sprite;
+int p4_ui_font, p4_ui_sprite, p4_ui_native;
+void p4_ui_raster(void *raster) { state(1,(unsigned)raster); }
 int p4_ui_quad_draw(const P4UiVertex *v) {
     float ps2[64]={0};
     for(int i=0;i<4;i++) {
@@ -121,6 +122,7 @@ int main(void) {
     Snapshot reference,actual,steps[80];FrFontTextRun run;
     unsigned cases=0,colors[]={0,0x12345601,0xABCDEF80,0xffffffff};
     assert(sizeof(void*)==4 && sizeof(FrFontGlyphRaster)==16 && sizeof(FrFontRasterEntry)==0x21c);
+    for(p4_ui_native=0;p4_ui_native<2;p4_ui_native++)
     for(int enabled=0;enabled<2;enabled++) for(int skip=0;skip<2;skip++)
     for(int palette=0;palette<2;palette++) for(int refs=1;refs<=2;refs++) for(int color=0;color<4;color++) {
         skip_frame=skip;p4_font_skip=enabled;

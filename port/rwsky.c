@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <math.h>
 #include "swizzle.h"
+/* b446: the functions every drawn atomic runs through, kept together in one block of code (the profile:
+   ~84 instruction-cache misses an atomic, the code spread over the whole renderer) */
+#define P4_HOT __attribute__((section(".text.p4hot")))
 
 #define R32(a) (*(volatile unsigned *)((a) + P4_K))
 #define R8(a) (*(volatile unsigned char *)((a) + P4_K))
@@ -94,6 +97,8 @@ static int in_frame;
    nothing: camera begin and clear, 2D, atomics, world sectors and Im3D return at once, and present neither waits nor
    flips. p4_frameskip: 0 off, else on; p4_frameskip_max: skipped frames in a row. */
 int p4_frameskip = 1, p4_frameskip_max = 2; /* b147 Heaven: off 15 FPS at 50% speed; on 11-14 FPS at ~98% speed */
+int p4_frameskip_force = 0; /* b407: 1 skips every other tick whatever the time (to profile undrawn ticks in PPSSPP) */
+int p4_slow_us = 0; /* b408: each drawn tick waits this long (PPSSPP at PSP speed: about 35000 gives 15 FPS with frameskip) */
 static int skip_frame, skip_run, skip_cap = 2;
 static int skip_debt_us;
 static unsigned skip_last_us, skipped_frames, skip_ticks;
@@ -189,12 +194,19 @@ static void skip_decide(int cap)
     }
     skip_last_us = now;
     skip_ticks++;
-    if (p4_frameskip && skip_debt_us > target / 2 && skip_run < p4_frameskip_max) {
+    if (p4_frameskip_force) { /* b407 diagnostic: every other tick undrawn, as on the PSP at 15 FPS (PPSSPP keeps up) */
+        skip_frame = skip_run == 0;
+        skip_run = skip_frame;
+    } else if (p4_frameskip && skip_debt_us > target / 2 && skip_run < p4_frameskip_max) {
         skip_frame = 1;
         skip_run++;
     } else {
         skip_frame = 0;
         skip_run = 0;
+    }
+    if (p4_slow_us > 0 && !skip_frame) { /* b408: a drawn tick as slow as on the PSP; frameskip then follows by itself */
+        while ((int)(sceKernelGetSystemTimeLow() - now) < p4_slow_us)
+            ;
     }
 }
 static int pipe_set, pipe_peak_v, pipe_peak_i;
@@ -288,7 +300,7 @@ static void *volatile flip_fb;
 static int flip_thread = -1;
 static unsigned gate_seq, texture_waits;
 static int gate_closed;
-int p4_list_double = 0; /* b364, see gate_poll */
+int p4_list_double = 1; /* b400: on by the user's choice. b399: off. b364, see gate_poll. b398: on by the user's choice (PSP b396 Entrance with everything flat: CPU 47 -> 42 ms; one more frame of latency) */
 static int gate_at_present;
 extern int gu_object_stack_depth;
 static int flip_main(SceSize size, void *arg)
@@ -401,6 +413,12 @@ static void pipe_texture_wait(void)
         sceKernelDelayThread(100);
 }
 static void begin_frame(void);
+/* b414 p4_load_release: when a field pack starts loading, the next frame start waits for the GE and releases every
+   cache (as before a movie): the old field's lists, skins and stand-ins no longer hold the heap the load needs.
+   b413 PSP: f044 -> Heaven, 33.3 MB of 38 MB used, a 256 KB raster refused, the game stopped. */
+int p4_load_release = 1;
+static int load_release_pending;
+static void load_release_check(void);
 static int frame_colour_pending, in_camera_clear; /* b379, im2d.h p4_keep_previous */
 static unsigned keep_previous_copies;
 extern int p4_cull_back; /* b381, bind_depth */
@@ -420,6 +438,9 @@ static void cover_report(unsigned frames);
 static void far_lod_report(void);
 static void guard_big_report(void);
 static void sl_report(void);
+static void ds_report(void); /* b418 */
+static void flat_report(void);
+static void gu_census_report(void); /* b431 */
 static void ptank_spill_collect(int all);
 static void ptank_spill_report(void);
 static void cloud_report(void);
@@ -440,6 +461,7 @@ static void census2d_report(unsigned frames);
 int p4_im3d = 1; /* 0: RwIm3D not drawn, as before b134 */
 static unsigned im3d_draws, im3d_vertices;
 static void frustum_report(unsigned frames);
+static void tex_census_report(void); /* b394 */
 static void replay_report(unsigned frames);
 static void call_report(void);
 extern int p4_fog;
@@ -519,7 +541,8 @@ enum { POOL_VERTICES = 125 * 1024 }; /* b193, b202, b232: 1 K vertices of room f
 static Vertex3D vertex_store[POOL_VERTICES] __attribute__((aligned(64)));
 static Vertex3D *vertex_pool = vertex_store;
 static int vertex_cap = POOL_VERTICES;
-#define MAX_VERTICES vertex_cap
+#define MAX_VERTICES (vertex_cap - flat_taken)
+static int flat_taken; /* b418 p4_flat_all: Vertex3D units taken from the pool's top this frame */
 static void *current_camera;
 static Raster display_raster = { .width = 640, .height = 448, .depth = 32, .cType = TYPE_CAMERA };
 static unsigned *feedback_pixels;
@@ -609,6 +632,8 @@ int p4_guard_clip = 1; /* 0: every triangle goes to the GE as before, for A/B on
                            floor; b97 room: the guard cost 13.7 ms of CPU, so b99 made it cheap: p4_guard_compact) */
 static int index_used;
 static unsigned cache_bytes, cache_frame, cache_hits, cache_builds, cache_misses, cache_noslot, guard_mesh_draws;
+extern int p4_ge_split, p4_ge_split_grow; /* b434, mesh.h */
+static unsigned ge_split_meshes, ge_split_tri_in, ge_split_tri_out, ge_split_refused, ge_split_us;
 int p4_mesh_cache = 1; /* 0: build every frame, as b68 */
 int p4_lock_memo = 1; /* b167: unlocked geometry reuses its sampled key and UV shift (draw_meshes_body); 0: as b166 */
 static unsigned lock_memo_hits;
@@ -897,17 +922,19 @@ static void swizzle_raster(Raster *r)
         mip_textures++, mip_bytes += total - wbytes * rows;
 }
 
-static void unswizzle_raster(Raster *r)
+/* 0 when there is no memory for the rows: the GE image and its head stay as they were */
+static int unswizzle_raster(Raster *r)
 {
     const SwizzleHead *h = swizzle_head(r->originalPixels);
     if (!h)
-        return;
+        return 1;
     unsigned char *linear = memalign(64, r->stride * r->height);
     if (!linear)
-        return;
+        return 0;
     ge_swizzle(r->originalPixels, linear, r->stride, r->height, h->wbytes, h->rows, 0);
     free(r->originalPixels - SWIZZLE_HEAD);
     r->originalPixels = linear;
+    return 1;
 }
 #include "clut32.h"
 static void tex2d_report(void); /* im2d.h, b374 */
@@ -931,6 +958,9 @@ static RttSlot rtt[RTT_SLOTS];
 static RttSlot *rtt_target; /* the camera texture being drawn into; 0: the screen */
 static int rtt_restore;     /* a target vanished outside a list: the next list starts by binding the screen */
 static unsigned rtt_passes, rtt_clears, rtt_atomics, rtt_2d, rtt_sampled; /* per 256 frames, for the log */
+int p4_rtt_census = 0; /* b401: the geometries drawn into camera textures, logged with the rtt line */
+enum { RTT_CENSUS = 32 };
+static struct { const void *g; unsigned calls; int verts, skinned, w, h; } rtt_census[RTT_CENSUS];
 static int target_w = SCREEN_W, target_h = SCREEN_H;
 static float target_sx = SCREEN_W / 640.0f, target_sy = SCREEN_H / 448.0f; /* game 2D coordinates to target pixels */
 
@@ -1026,19 +1056,73 @@ int func_003f98a0(void *out, Raster *r, int flags)
         return 1;
     r->stride = (r->width * r->depth + 7) / 8;
     r->originalPixels = memalign(64, r->stride * r->height);
-    if (r->depth <= 8)
+    if (r->originalPixels && r->depth <= 8)
         r->palette = memalign(64, 4 << r->depth);
-    if (!r->originalPixels)
-        p4_log("TRACE raster no memory %dx%dx%d stride %d flags %x type %x\n", r->width, r->height, r->depth, r->stride, flags, r->cType);
-    return r->originalPixels != 0;
+    if (r->originalPixels && (r->depth > 8 || r->palette))
+        return 1;
+    /* RwRasterCreate frees only the raster header on failure: no pixels without their palette
+       (from the persona4-portable fork, perf02) */
+    p4_log("TRACE raster no memory %dx%dx%d stride %d flags %x type %x\n", r->width, r->height, r->depth, r->stride, flags, r->cType);
+    free(r->originalPixels);
+    r->originalPixels = 0;
+    return 0;
 }
 
 /* rwSTANDARDRASTERDESTROY */
 static unsigned texture_generation;
+/* b439: which raster changed, not only that one did. Every lock, unlock, palette change and destroy bumped the one
+   texture_generation, and every static list keyed on it was recorded again: in a dialogue each typed letter
+   (the font raster) re-recorded the whole room, ~200 lists, up to 445 ms in one frame with b438's compiled lists.
+   A static list now keeps the rasters it binds and their generations (sl_tex_key); texture_epoch covers the global
+   changes (switches, the movie's end). A full table (RGEN_SLOTS distinct rasters changed) falls back to the old
+   global key. */
+enum { RGEN_SLOTS = 4096, SL_TEX = 16 };
+static struct RasterGen { const void *r; unsigned gen; } *rgen;
+static int rgen_full;
+static unsigned texture_epoch;
+static int sl_recording; /* b258 (static_list.h): a static list is being recorded */
+static const void *sl_tex[SL_TEX];
+static int sl_ntex; /* rasters bound while recording; > SL_TEX: too many, the list keeps the global key */
+static void raster_changed(const void *r)
+{
+    texture_generation++;
+    if (rgen_full)
+        return;
+    if (!rgen && !(rgen = calloc(RGEN_SLOTS, sizeof *rgen))) {
+        rgen_full = 1;
+        return;
+    }
+    unsigned h = ((unsigned)r >> 4) * 2654435761u >> 20;
+    for (int n = 0; n < RGEN_SLOTS; n++, h = (h + 1) & (RGEN_SLOTS - 1))
+        if (rgen[h].r == r || !rgen[h].r) {
+            rgen[h].r = r, rgen[h].gen = texture_generation;
+            return;
+        }
+    rgen_full = 1;
+}
+P4_HOT static unsigned raster_gen(const void *r)
+{
+    if (!rgen)
+        return 0;
+    unsigned h = ((unsigned)r >> 4) * 2654435761u >> 20;
+    for (int n = 0; n < RGEN_SLOTS && rgen[h].r; n++, h = (h + 1) & (RGEN_SLOTS - 1))
+        if (rgen[h].r == r)
+            return rgen[h].gen;
+    return 0;
+}
+static void sl_tex_note(const void *r)
+{
+    for (int i = 0; i < sl_ntex && i < SL_TEX; i++)
+        if (sl_tex[i] == r)
+            return;
+    if (sl_ntex < SL_TEX)
+        sl_tex[sl_ntex] = r;
+    sl_ntex++;
+}
 int func_003fb830(void *out, Raster *r)
 {
     translucent_flush();
-    texture_generation++; /* b258: prepared lists that bind it are made again */
+    raster_changed(r); /* b258: prepared lists that bind it are made again */
     RttSlot *slot = rtt_find(r);
     if (slot) {
         if (rtt_target == slot && in_frame)
@@ -1105,21 +1189,26 @@ int func_003f73d0(void *out, void *camera)
 /* A clear as 32-pixel-wide sprites: the GE fills one 8888 texture-cache-wide column at a time, a full-screen sprite
    walks across rows (PPSSPP docs, GE performance: "never clear using a single rectangle"). The colour carries the
    stencil in its alpha, as sceGuClear does for 8888. */
-int p4_clear_stripes = 1; /* 0: one sceGuClear rectangle, as b76 */
-static void clear_striped(int bits, unsigned colour, unsigned short depth)
+int p4_clear_stripes = 1;
+static void fill_target(unsigned colour, unsigned short depth)
 {
-    gu_dirty(); /* raw sceGu below: the mesh state cache no longer holds */
     typedef struct { unsigned colour; short x, y, z, pad; } ClearVertex;
-    enum { STRIPE = 32 };
-    const int count = (target_w + STRIPE - 1) / STRIPE * 2;
+    int width = !p4_clear_stripes ? target_w : rtt_target && rtt_target->psm == GU_PSM_5551 ? 64 : 32;
+    const int count = (target_w + width - 1) / width * 2;
     ClearVertex *v = sceGuGetMemory(count * sizeof *v);
     for (int i = 0; i < count / 2; i++) {
-        int x1 = (i + 1) * STRIPE < target_w ? (i + 1) * STRIPE : target_w;
-        v[2 * i] = (ClearVertex){ colour, i * STRIPE, 0, depth, 0 };
+        int x1 = (i + 1) * width < target_w ? (i + 1) * width : target_w;
+        v[2 * i] = (ClearVertex){ colour, i * width, 0, depth, 0 };
         v[2 * i + 1] = (ClearVertex){ colour, x1, target_h, depth, 0 };
     }
-    sceGuSendCommandi(211, (bits & 7) << 8 | 1); /* CLEARMODE on, with the buffers to write */
     sceGuDrawArray(GU_SPRITES, GU_COLOR_8888 | GU_VERTEX_16BIT | GU_TRANSFORM_2D, count, 0, v);
+}
+
+static void clear_striped(int bits, unsigned colour, unsigned short depth)
+{
+    gu_dirty();
+    sceGuSendCommandi(211, (bits & 7) << 8 | 1); /* CLEARMODE on, with the buffers to write */
+    fill_target(colour, depth);
     sceGuSendCommandi(211, 0);
 }
 
@@ -1150,7 +1239,7 @@ int func_003f7490(void *camera, unsigned *colour, int mask)
     if (bits && p4_clear_stripes)
         clear_striped(bits, *colour, 0);
     else if (bits)
-        sceGuClear(bits);
+        sceGuClear(bits); /* The SDK uses a single sprite without GU_FAST_CLEAR_BIT. */
     ge_time_end(timed, 3);
     if (own != was)
         rtt_bind_target(was);
@@ -1211,10 +1300,15 @@ int func_003f79b0(void *raster, void *device, int flags)
         tl_frame[(ge_queued + 1) & 7].present = tl_now();
     static int cull_back_seen;
     if (p4_cull_back != cull_back_seen) /* b382: prepared lists hold the cull state */
-        cull_back_seen = p4_cull_back, texture_generation++;
+        cull_back_seen = p4_cull_back, texture_generation++, texture_epoch++;
     static int clut32_seen;
     if (p4_clut32 != clut32_seen) /* b370: prepared lists that bound a 32-bit texture are made again */
-        clut32_seen = p4_clut32, texture_generation++;
+        clut32_seen = p4_clut32, texture_generation++, texture_epoch++;
+    { extern int p4_probe_tlevel, p4_probe_tfilter; static int tex_probe_seen; /* b1395: prepared lists rebind */
+      extern int p4_mip_bias;
+      extern int p4_probe_fill;
+      int now = p4_probe_tlevel | p4_probe_tfilter << 8 | (p4_mip_bias & 0xff) << 16 | p4_probe_fill << 24;
+      if (now != tex_probe_seen) tex_probe_seen = now, texture_generation++, texture_epoch++; }
 #ifdef P4_HW_PROFILE
     static unsigned present_end, window_start, samples, cpu_us, ge_us, vblank_us;
     unsigned before_sync = sceKernelGetSystemTimeLow();
@@ -1303,10 +1397,10 @@ int func_003f79b0(void *raster, void *device, int flags)
     unsigned after_sync = sceKernelGetSystemTimeLow();
     ge_us += after_sync - before_sync;
 #endif
-    vertex_used = index_used = 0;
+    vertex_used = index_used = flat_taken = 0;
     cache_frame++;
     { extern volatile int p4_cache_flush_pending; extern unsigned p4_mesh_cache_release(void);
-      if (p4_cache_flush_pending) p4_cache_flush_pending = 0, p4_mesh_cache_release(); }
+      if (p4_cache_flush_pending) p4_cache_flush_pending = 0, p4_mesh_cache_release(), load_release_pending = p4_load_release; }
     ptank_spill_collect(0);
     feedback_captured = 0;
     /* The game advances a fixed 1/30 s a frame everywhere (PS2: 60 VPS, 30 FPS): never show more than one frame per two vblanks. */
@@ -1435,6 +1529,10 @@ int func_003f79b0(void *raster, void *device, int flags)
         uv_memo_hits = 0;
         if (rtt_passes)
             p4_log("rtt passes %u clears %u atomics %u 2d %u sampled %u\n", rtt_passes, rtt_clears, rtt_atomics, rtt_2d, rtt_sampled);
+        for (int i = 0; p4_rtt_census && i < RTT_CENSUS && rtt_census[i].g; i++) /* b401 */
+            p4_log("rtt census %d: geometry %p vertices %d %s into %dx%d, %u calls per 256 frames\n", i, rtt_census[i].g,
+                   rtt_census[i].verts, rtt_census[i].skinned ? "skinned" : "static", rtt_census[i].w, rtt_census[i].h, rtt_census[i].calls);
+        memset(rtt_census, 0, sizeof rtt_census);
         rtt_passes = rtt_clears = rtt_atomics = rtt_2d = rtt_sampled = 0;
         { extern void p4_blend_report(void); p4_blend_report(); }
         { extern void p4_census3d_report(void); p4_census3d_report(); }
@@ -1463,6 +1561,10 @@ int func_003f79b0(void *raster, void *device, int flags)
             p4_cache_budget = want;
         }
         p4_log("mesh cache on %d hits %u builds %u misses %u noslot %u bytes %u budget %u heap_free %u guarded_meshes %u\n", p4_mesh_cache, cache_hits, cache_builds, cache_misses, cache_noslot, cache_bytes, p4_cache_budget, heap_free, guard_mesh_draws);
+        if (p4_ge_split || ge_split_refused) /* b434 */
+            p4_log("ge split %d grow %d: meshes %u triangles %u -> %u refused %u took %u us\n", p4_ge_split, p4_ge_split_grow, ge_split_meshes,
+                   ge_split_tri_in, ge_split_tri_out, ge_split_refused, ge_split_us);
+        ge_split_meshes = ge_split_tri_in = ge_split_tri_out = ge_split_refused = ge_split_us = 0;
         p4_log("cache audit %d checks %u stale positions %u uvs %u prelight %u vertices %u\n", p4_cache_audit, audit_checks, audit_stale[0], audit_stale[1], audit_stale[2], audit_stale_vertices);
         audit_checks = audit_stale[0] = audit_stale[1] = audit_stale[2] = audit_stale_vertices = 0;
         p4_log("lock memo %d hits %u\n", p4_lock_memo, lock_memo_hits);
@@ -1474,6 +1576,7 @@ int func_003f79b0(void *raster, void *device, int flags)
         void p4_vu0_report(unsigned frames);
         p4_vu0_report(256);
         p4_log("textures swizzled %u bytes %u mipmapped %u mip_bytes %u mipmaps %d\n", swizzled_textures, swizzled_bytes, mip_textures, mip_bytes, p4_mipmaps);
+        tex_census_report(); /* b394 */
         churn_report(256);
         if (p4_churn_top)
             churn_top_report(256);
@@ -1518,6 +1621,9 @@ int func_003f79b0(void *raster, void *device, int flags)
         cover_report(256);
         far_lod_report();
         sl_report();
+        ds_report();
+        flat_report();
+        gu_census_report();
         ptank_spill_report();
         cloud_report();
         fx_report();
@@ -1669,7 +1775,7 @@ static unsigned draws_since_stall;
    the present, so the GE runs list N whole while the CPU writes list N + 1 (one frame later on screen), instead of
    catching up on list N while it is being written (b82). b360 PSP Margaret: CPU 47.8 ms, GE alone 26 ms, yet 67 ms
    a frame. 0: as before. */
-static int gate_poll(void)
+P4_HOT static int gate_poll(void)
 {
     if (p4_list_double && !gate_at_present)
         return !gate_closed;
@@ -1702,7 +1808,7 @@ void *__wrap_sceGuGetMemory(int size)
     gu_list->current = next;
     return at + 2;
 }
-static void stall_flush(void)
+P4_HOT static void stall_flush(void)
 {
     if (gate_closed && !gate_poll())
         return;
@@ -1715,9 +1821,20 @@ static void stall_flush(void)
 }
 int p4_exp_scissor = 0; /* experiment: 1 = 3D meshes drawn into a 16x16 corner (vertex work stays, fill goes) */
 static int exp_scissor_on;
-static void gu_dirty(void)
+/* p4_2d_lean: a 2D draw's state setup leaves the stall address alone. gu_dirty moved it on every call, so each of the
+   ~157 2D draws of a dialogue frame made a sceGeListUpdateStallAddr syscall; the draws themselves move it every
+   p4_draw_batch (__wrap_sceGuDrawArray) and the frame's end moves it to the end. PSP, Margaret dialogue (b1399, profiled):
+   2D state setup 1.17 -> 0.66 M cycles a frame, CPU -1.6 ms, picture unchanged. 0: as before. */
+int p4_2d_lean = 1;
+static unsigned ui_epoch; /* b1401: bumped by every GE state change outside the 2D path (p4_2d_cache) */
+static const unsigned *strip_tail;
+static void gu_dirty_body(int flush);
+static void gu_dirty(void) { gu_dirty_body(1); }
+static void gu_dirty_body(int flush)
 {
-    stall_flush();
+    strip_tail = 0;
+    if (flush)
+        stall_flush(), ui_epoch++;
     if (exp_scissor_on) {
         sceGuScissor(0, 0, SCREEN_W, SCREEN_H);
         exp_scissor_on = 0;
@@ -1730,12 +1847,13 @@ static void gu_dirty(void)
     }
     gu_mesh_mode = 0;
 }
-static void gu_mesh_begin(void)
+P4_HOT static void gu_mesh_begin(void)
 {
     if (p4_exp_scissor && !exp_scissor_on) {
         sceGuScissor(0, 0, 16, 16);
         exp_scissor_on = 1;
     }
+    ui_epoch++; /* b1401: 3D state follows */
     if (gu_mesh_mode || !p4_state_cache)
         return;
     memset(&gs, 0, sizeof gs);
@@ -1768,8 +1886,14 @@ static inline void ge_word(unsigned cmd, unsigned arg)
 {
     *gu_list->current++ = cmd << 24 | (arg & 0xffffff);
 }
+/* b1396 diagnostic p4_probe_fill (3D meshes and skins only, gu_mesh_mode): 1 blending off, 2 depth test off,
+   4 depth write off, 8 (b1397) textures off. The picture changes; for the A/B of the GE wait only: which part of the 3D fill costs. */
+int p4_probe_fill = 0;
 static void st_enable(int state, int on)
 {
+    if (gu_mesh_mode && ((state == GU_BLEND && (p4_probe_fill & 1)) || (state == GU_DEPTH_TEST && (p4_probe_fill & 2)) ||
+                         (state == GU_TEXTURE_2D && (p4_probe_fill & 8)))) /* b1397: 8 textures off */
+        on = 0;
     if (gu_mesh_mode) {
         unsigned bit = 1u << state;
         if ((gs.known & bit) && !(gs.enabled & bit) == !on)
@@ -1812,6 +1936,8 @@ static void st_depth_func(int func)
 }
 static void st_depth_mask(int mask)
 {
+    if (gu_mesh_mode && (p4_probe_fill & 4))
+        mask = GU_TRUE; /* b1396: no depth write */
     if (gu_mesh_mode) {
         if (gs.depth_mask_known && gs.depth_mask == mask)
             return;
@@ -1885,15 +2011,263 @@ static void work_words(const unsigned *w, const unsigned *end)
    around draw_tested, so both alpha-test passes draw the same strips. */
 static const unsigned short *draw_strip_lens;
 static int draw_strip_n;
+/* b418: indexed vs flat draws by the site that issued them, per 256 frames (the "draw sites" line) */
+enum { DS_OTHER, DS_MESH, DS_IREC, DS_IPLAY, DS_SLREC, DS_SLPLAY, DS_SKIN, DS_ENV, DS_IM3D, DS_FX, DS_N };
+static int draw_site;
+static unsigned ds_draws[2][DS_N], ds_count[2][DS_N];
+static void ds_report(void)
+{
+    static const char *name[DS_N] = { "other", "mesh", "irec", "iplay", "slrec", "slplay", "skin", "env", "im3d", "fx" };
+    for (int i = 0; i < DS_N; i++)
+        if (ds_draws[0][i] | ds_draws[1][i])
+            p4_log("draw sites %-6s indexed %u draws %u verts, flat %u draws %u verts per 256 frames\n", name[i],
+                   ds_draws[1][i], ds_count[1][i], ds_draws[0][i], ds_count[0][i]);
+    memset(ds_draws, 0, sizeof ds_draws), memset(ds_count, 0, sizeof ds_count);
+}
+/* b418 p4_flat_all: every indexed draw that reaches gu_draw is gathered on the CPU into a flat copy taken from the
+   top of this frame's vertex pool (MAX_VERTICES shrinks by it) and drawn without an index list. Not while a static
+   or skin list records (they keep addresses past the frame). Instance replay copies words within the frame: safe.
+   Morphing vertex types stay indexed. For the PSP A/B: does the GE's sequential read pay for the CPU's copy? */
+int p4_flat_all = 0;
+static unsigned flat_all_draws, flat_all_vertices, flat_all_full;
+static int sl_recording, sk_recording;
+static int flat_hold; /* a GeCall record (p4_mesh_call, p4_skin_call) is being made: its words are CALLed in later frames */
+int p4_chain_strips = 0, p4_compact_immediate = 0;
+int p4_state_call = 0;
+static unsigned strip_chained, compact_2d_vertices, compact_3d_vertices, state_call_hits;
+static struct {
+    unsigned strip_format, strip_recording, strip_commands, strip_address;
+    unsigned state_recording, state_size, state_alloc, state_new, state_full;
+    unsigned ui_format, ui_recording, ui_room, ui_range, ui_fraction;
+    unsigned im3d_recording, im3d_room, im3d_range, im3d_float_uv;
+} ge_refused;
+
+static int ge_experiment_recording(void)
+{
+    /* gate_close reserves one SDK stack level to suppress stall updates. */
+    return sl_recording || sk_recording || flat_hold || gu_object_stack_depth > (gate_closed != 0);
+}
+
+static int compact_room(unsigned bytes)
+{
+    unsigned used = (((unsigned)gu_list->current & ~0x40000000u) - ((unsigned)list & ~0x40000000u)) / 4;
+    return used < LIST_WORDS - LIST_RESERVE && bytes / 4 <= LIST_WORDS - LIST_RESERVE - used;
+}
+
+static unsigned *state_call_begin(void)
+{
+    if (!p4_state_call)
+        return 0;
+    if (ge_experiment_recording()) {
+        ge_refused.state_recording++;
+        return 0;
+    }
+    return gu_list->current;
+}
+
+static void state_call_end(unsigned *from)
+{
+    enum { SLOTS = 64, WORDS = 40 };
+    typedef struct { unsigned count, hash, words[WORDS + 1]; } StateBlock;
+    static StateBlock *blocks;
+    if (!from)
+        return;
+    unsigned n = gu_list->current - from;
+    if (n < 4 || n > WORDS) {
+        ge_refused.state_size++;
+        return;
+    }
+    if (!blocks && !(blocks = memalign(64, SLOTS * sizeof *blocks))) {
+        ge_refused.state_alloc++;
+        return;
+    }
+    static unsigned used;
+    unsigned hash = 2166136261u;
+    for (unsigned i = 0; i < n; i++)
+        hash = (hash ^ from[i]) * 16777619u;
+    for (unsigned i = 0; i < used; i++) {
+        StateBlock *b = blocks + i;
+        if (b->hash == hash && b->count == n && !memcmp(b->words, from, n * sizeof *from)) {
+            unsigned addr = (unsigned)b->words;
+            gu_list->current = from;
+            ge_word(0x10, addr >> 8 & 0xf0000);
+            ge_word(0x0A, addr);
+            state_call_hits++;
+            return;
+        }
+    }
+    /* Keep CALL targets immutable while queued lists can still refer to them. */
+    if (used < SLOTS) {
+        StateBlock *b = blocks + used++;
+        b->count = n;
+        b->hash = hash;
+        memcpy(b->words, from, n * sizeof *from);
+        b->words[n] = 0x0B000000;
+        sceKernelDcacheWritebackRange(b->words, (n + 1) * sizeof *from);
+        ge_refused.state_new++;
+    } else
+        ge_refused.state_full++;
+}
+static int vt_stride(unsigned vt)
+{
+    static const unsigned char es[4] = { 0, 1, 2, 4 };
+    int off = 0, al = 1, c = vt >> 2 & 7;
+    int n[5] = { (vt >> 14 & 7) + 1, 2, 1, 3, 3 };
+    int e[5] = { es[vt >> 9 & 3], es[vt & 3], c == 7 ? 4 : c >= 4 ? 2 : 0, es[vt >> 5 & 3], es[vt >> 7 & 3] };
+    for (int i = 0; i < 5; i++)
+        if (e[i]) {
+            off = (off + e[i] - 1) & ~(e[i] - 1);
+            off += n[i] * e[i];
+            if (e[i] > al)
+                al = e[i];
+        }
+    return (off + al - 1) & ~(al - 1);
+}
+static void flat_report(void)
+{
+    if (p4_flat_all)
+        p4_log("flat all: draws %u vertices %u, kept indexed for room %u per 256 frames\n", flat_all_draws, flat_all_vertices, flat_all_full);
+    flat_all_draws = flat_all_vertices = flat_all_full = 0;
+    if (p4_chain_strips || p4_compact_immediate || p4_state_call)
+        p4_log("GE experiments: strips chained %u, packed 2D %u 3D %u vertices, state CALL hits %u\n",
+               strip_chained, compact_2d_vertices, compact_3d_vertices, state_call_hits);
+    if (p4_chain_strips)
+        p4_log("GE strip fallback: format %u recording %u command gap %u address/type %u\n",
+               ge_refused.strip_format, ge_refused.strip_recording, ge_refused.strip_commands, ge_refused.strip_address);
+    if (p4_state_call)
+        p4_log("GE state inline: recording %u size %u alloc %u first seen %u full %u\n",
+               ge_refused.state_recording, ge_refused.state_size, ge_refused.state_alloc, ge_refused.state_new, ge_refused.state_full);
+    if (p4_compact_immediate) {
+        p4_log("GE compact 2D fallback: format %u recording %u room %u range %u fractional %u\n",
+               ge_refused.ui_format, ge_refused.ui_recording, ge_refused.ui_room, ge_refused.ui_range, ge_refused.ui_fraction);
+        p4_log("GE compact Im3D fallback: recording %u room %u range %u float UV %u\n",
+               ge_refused.im3d_recording, ge_refused.im3d_room, ge_refused.im3d_range, ge_refused.im3d_float_uv);
+    }
+    memset(&ge_refused, 0, sizeof ge_refused);
+    strip_chained = compact_2d_vertices = compact_3d_vertices = state_call_hits = 0;
+}
+
+/* b431 census: the state calls that still reach libpspgu (outside p4_ge_raw), per frame, to decide whether the 2D
+   path's sceGuEnable/Disable and friends are worth moving onto st_enable. HW debug builds only: psp_hw_debug.py
+   wraps these names, the normal and release links do not. Enable/Disable are also counted by state. */
+#ifdef P4_HW_PROFILE
+#define GU_CENSUS(X) X(StencilFunc, (int a, int b, int c), (a, b, c)) X(StencilOp, (int a, int b, int c), (a, b, c))     X(AlphaFunc, (int a, int b, int c), (a, b, c)) X(DepthMask, (int a), (a)) X(DepthFunc, (int a), (a))     X(PixelMask, (unsigned a), (a)) X(FrontFace, (int a), (a)) X(BlendFunc, (int a, int b, int c, unsigned d, unsigned e), (a, b, c, d, e))     X(TexFunc, (int a, int b), (a, b)) X(TexFilter, (int a, int b), (a, b)) X(TexWrap, (int a, int b), (a, b))     X(TexMode, (int a, int b, int c, int d), (a, b, c, d)) X(TexImage, (int a, int b, int c, int d, const void *e), (a, b, c, d, e))     X(TexFlush, (void), ()) X(TexSync, (void), ()) X(SetMatrix, (int a, const ScePspFMatrix4 *b), (a, b))     X(Scissor, (int a, int b, int c, int d), (a, b, c, d))
+#define GU_CENSUS_ID(name, params, args) GUC_##name,
+#define GU_CENSUS_NAME(name, params, args) #name,
+#define GU_CENSUS_WRAP(name, params, args)     void __real_sceGu##name params;     void __wrap_sceGu##name params { gu_census[GUC_##name]++; __real_sceGu##name args; }
+enum { GUC_Enable, GUC_Disable, GU_CENSUS(GU_CENSUS_ID) GUC_COUNT };
+static unsigned gu_census[GUC_COUNT], gu_census_state[2][32];
+GU_CENSUS(GU_CENSUS_WRAP)
+void __real_sceGuEnable(int);
+void __real_sceGuDisable(int);
+void __wrap_sceGuEnable(int a) { gu_census[GUC_Enable]++, gu_census_state[1][a & 31]++; __real_sceGuEnable(a); }
+void __wrap_sceGuDisable(int a) { gu_census[GUC_Disable]++, gu_census_state[0][a & 31]++; __real_sceGuDisable(a); }
+static void gu_census_report(void)
+{
+    static const char *const names[GUC_COUNT] = { "Enable", "Disable", GU_CENSUS(GU_CENSUS_NAME) };
+    char line[200]; /* p4_log cuts at ~256 with its build prefix */
+    unsigned total = 0;
+    for (int i = 0; i < GUC_COUNT; i++)
+        total += gu_census[i];
+    int at = snprintf(line, sizeof line, "gu census x10/frame: total %u", total * 10 / 256);
+    for (int i = 0; i < GUC_COUNT && at < (int)sizeof line; i++)
+        if (gu_census[i] * 10 / 256)
+            at += snprintf(line + at, sizeof line - at, " %s %u", names[i], gu_census[i] * 10 / 256);
+    p4_log("%s\n", line);
+    at = snprintf(line, sizeof line, "gu census states x10/frame on/off:");
+    for (int s = 0; s < 32 && at < (int)sizeof line; s++)
+        if ((gu_census_state[1][s] + gu_census_state[0][s]) * 10 / 256)
+            at += snprintf(line + at, sizeof line - at, " %d:%u/%u", s, gu_census_state[1][s] * 10 / 256, gu_census_state[0][s] * 10 / 256);
+    p4_log("%s\n", line);
+    memset(gu_census, 0, sizeof gu_census);
+    memset(gu_census_state, 0, sizeof gu_census_state);
+}
+#else
+static void gu_census_report(void) {}
+#endif
+
+static unsigned *draw_address(unsigned *at, int prim, unsigned type, int count, const void *indices, const void *vertices)
+{
+    static unsigned next_vertex, last_type, last_prim;
+    int strip = 0, chain = 0;
+    unsigned address = (unsigned)vertices;
+    if (p4_chain_strips && prim == GU_TRIANGLE_STRIP) {
+        if (!type || (type & (GU_INDEX_BITS | GU_VERTICES_BITS)) || indices || !vertices || count <= 0 || count > 65535)
+            ge_refused.strip_format++;
+        else if (ge_experiment_recording())
+            ge_refused.strip_recording++;
+        else {
+            strip = 1;
+            if (strip_tail != at || at[-1] != last_prim)
+                ge_refused.strip_commands++;
+            else if (next_vertex != address || last_type != type)
+                ge_refused.strip_address++;
+            else
+                chain = 1;
+        }
+    }
+    if (chain) {
+        strip_chained++;
+    } else {
+        if (type)
+            *at++ = 0x12u << 24 | (type & 0xffffff);
+        if (indices) {
+            *at++ = 0x10u << 24 | ((unsigned)indices >> 8 & 0xf0000);
+            *at++ = 0x02u << 24 | ((unsigned)indices & 0xffffff);
+        }
+        if (vertices) {
+            *at++ = 0x10u << 24 | (address >> 8 & 0xf0000);
+            *at++ = 0x01u << 24 | (address & 0xffffff);
+        }
+    }
+    last_prim = 0x04u << 24 | (((unsigned)prim << 16 | count) & 0xffffff);
+    *at++ = last_prim;
+    strip_tail = strip ? at : 0;
+    if (strip)
+        next_vertex = address + count * vt_stride(type), last_type = type;
+    return at;
+}
+
 static void gu_draw(int prim, int vtype, int count, const void *indices, const void *vertices)
 {
+    int more = draw_strip_n > 1 && indices ? draw_strip_n - 1 : 0; /* strips: count is every strip's indices */
+    static unsigned caller_vtype; /* the format the callers set (a second pass sends 0), not the flat one sent for it */
+    if (vtype)
+        caller_vtype = vtype;
+    if (p4_flat_all && indices && !sl_recording && !sk_recording && !flat_hold) {
+        unsigned vt = caller_vtype;
+        int total = count;
+        if (!(vt & GU_VERTICES_BITS) && (vt & GU_INDEX_BITS)) {
+            int stride = vt_stride(vt);
+            int units = (total * stride + sizeof(Vertex3D) - 1) / sizeof(Vertex3D);
+            /* ponytail: 4096 units of slack above vertex_used for writers that fill before they advance it (guard cuts) */
+            if (vertex_used + 4096 + units <= MAX_VERTICES) {
+                flat_taken += units;
+                char *out = (char *)(vertex_pool + vertex_cap - flat_taken), *o = out;
+                const char *src = vertices;
+                if ((vt & GU_INDEX_BITS) == GU_INDEX_16BIT)
+                    for (int i = 0; i < total; i++, o += stride)
+                        memcpy(o, src + ((const unsigned short *)indices)[i] * stride, stride);
+                else
+                    for (int i = 0; i < total; i++, o += stride)
+                        memcpy(o, src + ((const unsigned char *)indices)[i] * stride, stride);
+                sceKernelDcacheWritebackRange(out, total * stride);
+                vtype = vt & ~GU_INDEX_BITS, indices = 0, vertices = out;
+                flat_all_draws++, flat_all_vertices += total;
+            } else {
+                flat_all_full++;
+                vtype = vt; /* the GE may hold a flat VTYPE from the draw before */
+            }
+        } else
+            vtype = vt;
+    }
+    ds_draws[indices != 0][draw_site]++, ds_count[indices != 0][draw_site] += count;
     mesh_draw_calls++;
     mesh_draw_vertices += count;
     if (vtype)
         work_vtype = vtype;
     if (ge_work_on)
         work_draw(work_vtype, count, indices);
-    int more = draw_strip_n > 1 && indices ? draw_strip_n - 1 : 0;
     if (more)
         count = draw_strip_lens[0];
     if (!gu_mesh_mode || p4_draw_batch <= 1) {
@@ -1902,18 +2276,7 @@ static void gu_draw(int prim, int vtype, int count, const void *indices, const v
             *gu_list->current++ = 0x04u << 24 | (((unsigned)prim << 16 | draw_strip_lens[k]) & 0xffffff);
         return;
     }
-    unsigned *c = gu_list->current;
-    if (vtype)
-        *c++ = 0x12u << 24 | (vtype & 0xffffff);
-    if (indices) {
-        *c++ = 0x10u << 24 | ((unsigned)indices >> 8 & 0xf0000);
-        *c++ = 0x02u << 24 | ((unsigned)indices & 0xffffff);
-    }
-    if (vertices) {
-        *c++ = 0x10u << 24 | ((unsigned)vertices >> 8 & 0xf0000);
-        *c++ = 0x01u << 24 | ((unsigned)vertices & 0xffffff);
-    }
-    *c++ = 0x04u << 24 | (((unsigned)prim << 16 | count) & 0xffffff);
+    unsigned *c = draw_address(gu_list->current, prim, vtype, count, indices, vertices);
     for (int k = 1; k <= more; k++)
         *c++ = 0x04u << 24 | (((unsigned)prim << 16 | draw_strip_lens[k]) & 0xffffff);
     gu_list->current = c;
@@ -1925,25 +2288,59 @@ static void gu_draw(int prim, int vtype, int count, const void *indices, const v
    (--wrap): the same words, but the stall address moves every p4_draw_batch draws through stall_flush (and the gate)
    instead of a sceGeListUpdateStallAddr syscall per draw. p4_ge_raw 0: libpspgu's. */
 void __real_sceGuDrawArray(int prim, int vtype, int count, const void *indices, const void *vertices);
+typedef struct { unsigned short u, v; unsigned colour; short x, y; unsigned short z, pad; } Compact2D;
+static Compact2D *compact_2d(const Vertex3D *vertices, int count)
+{
+    if (!compact_room(count * sizeof(Compact2D) + 16)) {
+        ge_refused.ui_room++;
+        return 0;
+    }
+    for (int i = 0; i < count; i++) {
+        const Vertex3D *v = vertices + i;
+        if (!(v->u >= 0 && v->u <= 65535 && v->v >= 0 && v->v <= 65535 &&
+              v->x >= -32768 && v->x <= 32767 && v->y >= -32768 && v->y <= 32767 && v->z >= 0 && v->z <= 65535)) {
+            ge_refused.ui_range++;
+            return 0;
+        }
+        if (v->u != (int)v->u || v->v != (int)v->v || v->x != (int)v->x || v->y != (int)v->y || v->z != (int)v->z) {
+            ge_refused.ui_fraction++;
+            return 0;
+        }
+    }
+    Compact2D *out = sceGuGetMemory(count * sizeof *out);
+    for (int i = 0; i < count; i++) {
+        const Vertex3D *v = vertices + i;
+        out[i] = (Compact2D){v->u, v->v, v->colour, v->x, v->y, v->z, 0};
+    }
+    return out;
+}
+
 void __wrap_sceGuDrawArray(int prim, int vtype, int count, const void *indices, const void *vertices)
 {
     if (!p4_ge_raw) {
         __real_sceGuDrawArray(prim, vtype, count, indices, vertices);
         return;
     }
-    unsigned *c = gu_list->current;
-    if (vtype)
-        *c++ = 0x12u << 24 | (vtype & 0xffffff);
-    if (indices) {
-        *c++ = 0x10u << 24 | ((unsigned)indices >> 8 & 0xf0000);
-        *c++ = 0x02u << 24 | ((unsigned)indices & 0xffffff);
+    int original_type = 0;
+    if (p4_compact_immediate && (vtype & GU_TRANSFORM_2D)) {
+        if (vtype != (GU_TRANSFORM_2D | GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF) ||
+            indices || !vertices || count <= 0 || count > 65535)
+            ge_refused.ui_format++;
+        else if (ge_experiment_recording())
+            ge_refused.ui_recording++;
+        else {
+            Compact2D *packed = compact_2d(vertices, count);
+            if (packed) {
+                original_type = vtype;
+                vtype = GU_TRANSFORM_2D | GU_TEXTURE_16BIT | GU_COLOR_8888 | GU_VERTEX_16BIT;
+                vertices = packed;
+                compact_2d_vertices += count;
+            }
+        }
     }
-    if (vertices) {
-        *c++ = 0x10u << 24 | ((unsigned)vertices >> 8 & 0xf0000);
-        *c++ = 0x01u << 24 | ((unsigned)vertices & 0xffffff);
-    }
-    *c++ = 0x04u << 24 | (((unsigned)prim << 16 | count) & 0xffffff);
-    gu_list->current = c;
+    gu_list->current = draw_address(gu_list->current, prim, vtype, count, indices, vertices);
+    if (original_type)
+        ge_word(0x12, original_type);
     if (++draws_since_stall >= (unsigned)p4_draw_batch && !gu_object_stack_depth)
         stall_flush();
 }
@@ -2115,13 +2512,44 @@ static void bind_mask_mode(unsigned alpha, int fragment_alpha)
 }
 static void bind_mask(unsigned alpha) { bind_mask_mode(alpha, p4_alpha_pixel); }
 
-int func_003f5070(int state, int value)
+static inline void ui_set_state(int state, int value)
 {
-    if (state >= 0 && state < MAX_STATE && render_state[state] != value) {
+    if (render_state[state] != value) {
         render_state[state] = value;
         sl_state_dirty = 1;
     }
+}
+
+int func_003f5070(int state, int value)
+{
+    if (state >= 0 && state < MAX_STATE)
+        ui_set_state(state, value);
     return 1;
+}
+
+/* Keep the game's readable state, without its RW device-table calls per sprite/glyph. */
+void p4_ui_raster(void *raster) { ui_set_state(1, (int)raster); }
+void p4_ui_sprite_state(void *raster, unsigned flags, int set_states)
+{
+    if (set_states) {
+        ui_set_state(6, 1);
+        ui_set_state(7, 2);
+        ui_set_state(8, 1);
+        ui_set_state(9, 2);
+        ui_set_state(12, 1);
+        ui_set_state(11, 6);
+        ui_set_state(10, 5);
+        ui_set_state(2, 4);
+        ui_set_state(14, 0);
+        unsigned blend = flags & 2 ? 0x42 : flags & 1 ? 0x48 : 0x44;
+        unsigned test = flags & 3 ? 0x71801 : 0x717fb;
+        if (sky_state[2] != blend || sky_state[3] != test) {
+            sky_state[2] = blend;
+            sky_state[3] = test;
+            sl_state_dirty = 1;
+        }
+    }
+    p4_ui_raster(raster);
 }
 
 int func_003f5d90(int state, int *value)
@@ -2144,8 +2572,11 @@ enum {
 int func_003fc5f0(unsigned char **pixels, Raster *r, int how)
 {
     pipe_texture_wait();
-    texture_generation++;
-    unswizzle_raster(r);
+    if (!unswizzle_raster(r)) { /* never hand GE-order bytes out as rows; a later lock can retry */
+        *pixels = 0;
+        return 0;
+    }
+    raster_changed(r);
     r->cpPixels = r->originalPixels;
     *pixels = r->cpPixels;
     if (!r->cpPixels)
@@ -2158,7 +2589,7 @@ int func_003fc5f0(unsigned char **pixels, Raster *r, int how)
 /* rwSTANDARDRASTERUNLOCK */
 int func_003fd230(void *out, Raster *r)
 {
-    texture_generation++;
+    raster_changed(r);
     int lock = r->privateFlags & (PIXELS_LOCKED_READ | PIXELS_LOCKED_WRITE);
     r->privateFlags &= ~(PIXELS_LOCKED_READ | PIXELS_LOCKED_WRITE);
     if (r->depth == 32 && lock != PIXELS_LOCKED_READ) { /* PS2 alpha tops out at 0x80 */
@@ -2175,7 +2606,7 @@ int func_003fd230(void *out, Raster *r)
 int func_003fd460(unsigned char **palette, Raster *r, int how)
 {
     pipe_texture_wait();
-    texture_generation++;
+    raster_changed(r);
     *palette = r->palette;
     if (!r->palette)
         return 0;
@@ -2186,7 +2617,7 @@ int func_003fd460(unsigned char **palette, Raster *r, int how)
 
 int func_003fd520(void *out, Raster *r)
 {
-    texture_generation++;
+    raster_changed(r);
     int lock = r->privateFlags & (PALETTE_LOCKED_READ | PALETTE_LOCKED_WRITE);
     r->privateFlags &= ~(PALETTE_LOCKED_READ | PALETTE_LOCKED_WRITE);
     if (lock == PALETTE_LOCKED_READ)
@@ -2359,6 +2790,97 @@ void p4_tmx_copy_limited(void *destination, const void *source, unsigned width, 
 #define memalign(a, n) p4a_memalign(a, n)
 #define realloc(p, n) p4a_realloc(p, n)
 #define free(p) p4a_free(p)
+/* b394 p4_tex_census 1: which textures a frame reads, for keeping the hottest in VRAM (b1395 PSP: p4_mipmaps 0 put
+   the Margaret dialogue's GE tail +21 ms and the CPU +11.5 ms: texture reads from RAM, sharing the bus, are the
+   frame's main cost). Per texture: screen pixels drawn with it per frame (3D: the atomic's sphere cover x its meshes'
+   share of the indices, at the entry of atomic_render_body, before the prepared paths; 2D: the draw's box), times
+   bits a texel = the read estimate. Logged every 256 frames, biggest first, with level-0 and mip bytes (what VRAM
+   would hold) and why a texture has no mip levels: n not a power of two, s under p4_mip_min, m no memory, u not
+   swizzled. A rough ranking (spheres overstate, overdraw counts each layer), not a measurement. */
+int p4_tex_census = 0;
+enum { TC_SLOTS = 512 };
+typedef struct { const Raster *r; float pixels; unsigned uses, bytes; short w, h; unsigned char depth, levels, why, where; } TexCensus;
+static TexCensus *tex_census;
+static unsigned tc_frames, tc_full;
+static unsigned vc_count[2][4]; /* b395: vc_note */
+static void tex_census_note(const Raster *r, float cover, int is2d)
+{
+    if (!r || r == &display_raster || !(cover > 0))
+        return;
+    if (p4_clut32 && r->depth == 32 && clut32_slots) /* the CLUT8 copy the GE reads instead (clut32_find, without making one) */
+        for (int k = 0; k < CLUT32_PROBE; k++) {
+            const Clut32 *s = &clut32_slots[((((unsigned)r >> 4) * 2654435761u >> 24) + k) & (CLUT32_SLOTS - 1)];
+            if (s->of == r) {
+                if (s->pixels == r->originalPixels && s->copy.originalPixels)
+                    r = &s->copy;
+                break;
+            }
+        }
+    if (!tex_census && !(tex_census = calloc(TC_SLOTS, sizeof *tex_census)))
+        return;
+    static unsigned last;
+    if (last != cache_frame)
+        last = cache_frame, tc_frames++;
+    unsigned at = ((unsigned)r >> 4) * 2654435761u >> 23;
+    for (unsigned p = 0; p < TC_SLOTS; p++) {
+        TexCensus *e = &tex_census[(at + p) & (TC_SLOTS - 1)];
+        if (e->r && e->r != r)
+            continue;
+        if (!e->r) { /* the shape now: the raster may be gone by the report */
+            const SwizzleHead *h = swizzle_head(r->originalPixels);
+            int levels = h ? (int)h->levels : 1, wb, rows;
+            unsigned bytes = h ? h->wbytes * h->rows : (unsigned)(r->stride * r->height);
+            for (int l = 1; l < levels; l++)
+                bytes += mip_level_size(r, l, &wb, &rows);
+            if (r->depth <= 8)
+                bytes += 4u << r->depth;
+            int pow2 = !(r->width & (r->width - 1)) && !(r->height & (r->height - 1));
+            *e = (TexCensus){ .r = r, .bytes = bytes, .w = r->width, .h = r->height, .depth = r->depth, .levels = levels,
+                              .why = levels > 1 ? '-' : !h ? 'u' : !pow2 ? 'n' : (r->width < p4_mip_min || r->height < p4_mip_min) ? 's' : 'm' };
+        }
+        e->pixels += (cover > 1 ? 1 : cover) * (SCREEN_W * SCREEN_H);
+        e->uses++;
+        e->where |= is2d ? 1 : 2;
+        return;
+    }
+    tc_full++;
+}
+static int tc_order(const void *a, const void *b)
+{
+    const TexCensus *x = *(TexCensus *const *)a, *y = *(TexCensus *const *)b;
+    float rx = x->pixels * x->depth, ry = y->pixels * y->depth;
+    return rx < ry ? 1 : rx > ry ? -1 : 0;
+}
+static void tex_census_report(void)
+{
+    if (!p4_tex_census || !tex_census || !tc_frames)
+        return;
+    static TexCensus *sorted[TC_SLOTS];
+    int n = 0;
+    float all = 0;
+    for (int i = 0; i < TC_SLOTS; i++)
+        if (tex_census[i].r)
+            sorted[n++] = &tex_census[i], all += tex_census[i].pixels * tex_census[i].depth;
+    qsort(sorted, n, sizeof *sorted, tc_order);
+    p4_log("tex census %u frames: textures %d full %u; read estimate %u KB a frame (pixels x bits / 8)\n", tc_frames, n, tc_full,
+           (unsigned)(all / 8 / 1024 / tc_frames));
+    float share = 0;
+    unsigned bytes = 0;
+    for (int i = 0; i < n && i < 32; i++) {
+        const TexCensus *e = sorted[i];
+        share += e->pixels * e->depth;
+        bytes += e->bytes;
+        p4_log("tex census %2d: %p %dx%d %db levels %d (%c) %u B, pixels %u uses %u a frame %s; cumulative %d%% of reads in %u KB\n", i,
+               e->r, e->w, e->h, e->depth, e->levels, e->why, e->bytes, (unsigned)(e->pixels / tc_frames), e->uses / tc_frames,
+               e->where == 1 ? "2D" : e->where == 2 ? "3D" : "2D+3D", all > 0 ? (int)(share * 100 / all) : 0, bytes / 1024);
+    }
+    for (int s = 0; s < 2; s++) /* b395 */
+        p4_log("vertex colour census %s, vertices a frame: no prelit %u, prelit one colour %u, prelit varying %u (alpha below 255 %u)\n",
+               s ? "skinned" : "static", vc_count[s][0] / tc_frames, vc_count[s][1] / tc_frames, vc_count[s][2] / tc_frames, vc_count[s][3] / tc_frames);
+    memset(vc_count, 0, sizeof vc_count);
+    memset(tex_census, 0, TC_SLOTS * sizeof *tex_census);
+    tc_frames = tc_full = 0;
+}
 #include "im2d.h"
 /* Atomics, without RenderWare's PS2 pipelines: the game's geometry is never native, its arrays are usable as they are. */
 typedef struct { float x, y, z; } V3;
@@ -2437,6 +2959,17 @@ static float cover_total, cover_weighted;
    outside), so this trades distant detail (Heaven's 13 statues, v1180) for time. */
 int p4_cull_far = 0, p4_cull_min_vertices = 500;
 static unsigned cull_far_atomics;
+/* b1398: which geometries p4_cull_far leaves out (the Heaven statues: what they are, why they cost) */
+static const Geometry *cull_far_seen[8];
+static unsigned cull_far_seen_n[8];
+static void cull_far_note(const Geometry *g)
+{
+    for (int i = 0; i < 8; i++)
+        if (cull_far_seen[i] == g || !cull_far_seen[i]) {
+            cull_far_seen[i] = g, cull_far_seen_n[i]++;
+            return;
+        }
+}
 static int atomic_far(const Geometry *g, const Matrix *model)
 {
     const float *s = g->morphTarget->sphere;
@@ -2467,6 +3000,37 @@ static float atomic_cover(const Geometry *g, const Matrix *model)
     float q = r * sx / z;
     float c = 3.14159f * q * q;
     return c > 1 ? 1 : c;
+}
+/* b395 with p4_tex_census: do drawn vertices need their colour? [0] static [1] skinned; vertices a frame without
+   prelit (one colour by construction), prelit all one colour, prelit varying; and the varying ones' alpha not all 255 */
+
+static void vc_note(const Geometry *g)
+{
+    int skinned = SKIN_OF_GEOMETRY(g) != 0, n = g->numVertices;
+    if (!g->preLit) {
+        vc_count[skinned][0] += n;
+        return;
+    }
+    unsigned first = g->preLit[0], alpha = 0;
+    int same = 1;
+    for (int i = 0; i < n; i++)
+        same &= g->preLit[i] == first, alpha |= ~g->preLit[i] & 0xff000000u;
+    vc_count[skinned][same ? 1 : 2] += n;
+    if (!same && alpha)
+        vc_count[skinned][3] += n;
+}
+/* b394: the atomic's cover over its meshes' textures, by their share of the indices */
+static void tex_census_atomic(const Geometry *g, const Matrix *model)
+{
+    vc_note(g);
+    const MeshHeader *header = g->mesh;
+    if (!header || !header->totalIndices)
+        return;
+    float cover = atomic_cover(g, model);
+    const Mesh *mesh = (const Mesh *)((const char *)header + sizeof(MeshHeader) + header->firstMeshOffset);
+    for (int i = 0; i < header->numMeshes; i++, mesh++)
+        if (mesh->material && mesh->material->texture)
+            tex_census_note(*(Raster **)mesh->material->texture, cover * mesh->numIndices / header->totalIndices, 0);
 }
 static void cover_note(const Geometry *g, float cover, unsigned calls, unsigned vertices, unsigned ge_us, const unsigned *work)
 {
@@ -2522,6 +3086,13 @@ static void cover_report(unsigned frames)
     p4_log("cull cover %d: %u atomics per frame\n", p4_cull_cover, cull_cover_atomics / frames);
     cull_cover_atomics = 0;
     cull_far_atomics = 0;
+    for (int i = 0; i < 8 && cull_far_seen[i]; i++) {
+        const Geometry *g = cull_far_seen[i];
+        p4_log("cull far geometry %p v%d f%x meshes %d indices %d morph %d radius %d: %u per frame\n", (void *)g, g->numVertices, g->flags,
+               g->mesh ? g->mesh->numMeshes : -1, g->mesh ? (int)g->mesh->totalIndices : -1, g->numMorphTargets,
+               (int)g->morphTarget->sphere[3], cull_far_seen_n[i] / frames);
+        cull_far_seen[i] = 0, cull_far_seen_n[i] = 0;
+    }
     p4_log("cover per frame: atomics' sphere cover %d%% draw-weighted %d%% mesh draws %u vertices %u exp_scissor %d\n",
            (int)(cover_total * 100 / frames), (int)(cover_weighted * 100 / frames), mesh_draw_calls / frames, mesh_draw_vertices / frames, p4_exp_scissor);
     for (int k = 0; k < 8; k++) {
@@ -2566,10 +3137,38 @@ static void ib_boundary(void) { ib_before(0); }
 /* AtomicDefaultRenderCallBack */
 static void *atomic_render_body(void *atomic);
 static void *atomic_draw(void *atomic, Geometry *g, char *frame, const Matrix *model, const V3 *normals, int env);
-void *func_003be9f0(void *atomic)
+/* b425 (with p4_model_census): the tick each frame root last had an atomic drawn on the screen (not into a camera
+   texture). The game's frustum test runs before this callback: a root that is not here was not on screen. */
+enum { DRAWN_ROOTS = 1024 };
+static struct { const void *root; unsigned tick; } drawn_root[DRAWN_ROOTS];
+static int drawn_slot(const void *root) { return ((unsigned)root >> 4) * 2654435761u >> 22; } /* 10 bits */
+static unsigned drawn_tick_of(const void *root)
+{
+    for (int k = 0, i = drawn_slot(root); k < 8; k++, i = (i + 1) & (DRAWN_ROOTS - 1))
+        if (drawn_root[i].root == root)
+            return drawn_root[i].tick;
+    return 0;
+}
+static void drawn_note(void *atomic)
+{
+    const char *frame = *(const char **)((char *)atomic + ATOMIC_FRAME);
+    const void *root = frame ? *(const void **)(frame + 160) : 0;
+    if (!root || rtt_target)
+        return;
+    for (int k = 0, i = drawn_slot(root); k < 8; k++, i = (i + 1) & (DRAWN_ROOTS - 1))
+        if (drawn_root[i].root == root || !drawn_root[i].root || k == 7) {
+            drawn_root[i].root = root, drawn_root[i].tick = p4_anim_tick;
+            return;
+        }
+}
+P4_HOT void *func_003be9f0(void *atomic)
 {
     if (SKIPPING)
         return atomic;
+#ifdef P4_HW_PROFILE /* p4_model_census lives in prof.h's hwdbg part: release builds have none */
+    if (p4_model_census)
+        drawn_note(atomic);
+#endif
     prof_begin(PROF_ATOMIC);
     void *r = atomic_render_body(atomic);
     prof_end(PROF_ATOMIC);
@@ -2606,7 +3205,7 @@ static const unsigned char *matfx_env_entry(const Material *material)
     }
     return 0;
 }
-static int matfx_geometry_env(const Geometry *g)
+P4_HOT static int matfx_geometry_env(const Geometry *g)
 {
     if (!p4_matfx_env)
         return 0;
@@ -2716,7 +3315,9 @@ static void matfx_env_pass(const Geometry *g, const V3 *positions, const V3 *nor
         bind_raster(*texture, GU_REPEAT);
         int strips = draw_strip_n;
         draw_strip_n = 0;
+        draw_site = DS_ENV;
         gu_draw(prim, VT_3D, mesh->numIndices, mesh->indices, v);
+        draw_site = DS_OTHER;
         draw_strip_n = strips;
         matfx_env_draws++;
         matfx_env_vertices += count;
@@ -2742,7 +3343,7 @@ static void *atomic_render_body(void *atomic)
         return atomic;
     if ((p4_probe_flags & 16) && rtt_target) /* b327 diagnostic: nothing 3D drawn into camera textures */
         return atomic;
-    if ((p4_probe_flags & 64) && rtt_target && !SKIN_OF_GEOMETRY(*(Geometry **)((char *)atomic + ATOMIC_GEOMETRY))) /* b333 diagnostic */
+    if ((p4_probe_flags & 64 || !p4_shadow_props) && rtt_target && !SKIN_OF_GEOMETRY(*(Geometry **)((char *)atomic + ATOMIC_GEOMETRY))) /* b333 diagnostic; b403 p4_shadow_props 0 */
         return atomic;
     Geometry *g = *(Geometry **)((char *)atomic + ATOMIC_GEOMETRY);
     char *frame = *(char **)((char *)atomic + ATOMIC_FRAME);
@@ -2750,6 +3351,13 @@ static void *atomic_render_body(void *atomic)
     cull_atomic_flags = g ? (int)(g->flags & 0xffff) : -1;
     ib_before(g); /* b254: a batch of other atomics is drawn first, so the order holds */
     rtt_atomics += rtt_target != 0;
+    if (rtt_target && p4_rtt_census && g) /* b401: what the game draws into camera textures (the field shadow camera) */
+        for (int i = 0; i < RTT_CENSUS; i++)
+            if (!rtt_census[i].g || rtt_census[i].g == g) {
+                rtt_census[i].g = g, rtt_census[i].calls++, rtt_census[i].verts = g->numVertices;
+                rtt_census[i].skinned = SKIN_OF_GEOMETRY(g) != 0, rtt_census[i].w = rtt_target->w, rtt_census[i].h = rtt_target->h;
+                break;
+            }
     if (tank && frame && current_camera) {
         draw_ptank(atomic, tank, g, frame);
         return atomic;
@@ -2844,6 +3452,7 @@ static void *atomic_render_body(void *atomic)
     prof_end(PROF_ALTM);
     if (p4_cull_far > 0 && g->numVertices >= p4_cull_min_vertices && atomic_far(g, model)) {
         cull_far_atomics++;
+        cull_far_note(g);
         return atomic;
     }
     /* b246 p4_cull_cover N (0 off): an atomic of at least p4_cull_min_vertices whose bounding sphere covers less than
@@ -2854,6 +3463,8 @@ static void *atomic_render_body(void *atomic)
         cull_cover_atomics++;
         return atomic;
     }
+    if (p4_tex_census) /* b394 */
+        tex_census_atomic(g, model);
     /* b268: an env-mapped atomic needs its second pass right after it, so it skips the batched and prepared paths */
     prof_begin(PROF_AENV); /* b280: sections for the static atomic's way to its list (aenv aib afp asl) */
     int env = !shadow_shear_m && matfx_geometry_env(g);
@@ -2914,7 +3525,9 @@ static void *atomic_draw(void *atomic, Geometry *g, char *frame, const Matrix *m
         matfx_env_skinned += env != 0, matfx_env_skinned_lit += env && normals;
         if (p4_ge_skin && (!normals || g->morphTarget->normals) && !(env && p4_matfx_env_skin && !env_ge)) {
             prof_begin(PROF_GESKIN);
+            draw_site = DS_SKIN;
             int done = draw_skinned_ge(g, skin, hierarchy, model, normals != 0, g->flags & 0x40, env_ge);
+            draw_site = DS_OTHER;
             prof_end(PROF_GESKIN);
             if (done) {
                 skinned_drawn++;
@@ -3069,7 +3682,57 @@ static void im3d_draw(const unsigned *stash)
         sceGuFrontFace(GU_CCW);
         st_enable(GU_CULL_FACE, 1);
     }
-    draw_tested(prims[type], idx ? VT_3D : VT_3D & ~GU_INDEX_BITS, n, idx, out);
+    draw_site = DS_IM3D;
+    int vtype = idx ? VT_3D : VT_3D & ~GU_INDEX_BITS;
+    const void *draw_vertices = out;
+    float scale = 0, decode[4];
+    int pack = 0;
+    if (p4_compact_immediate) {
+        if (ge_experiment_recording())
+            ge_refused.im3d_recording++;
+        else if (!compact_room(count * 20 + 16))
+            ge_refused.im3d_room++;
+        else
+            pack = 1;
+    }
+    if (pack) {
+        float bound = 1.0f / 1048576;
+        for (unsigned i = 0; i < count; i++)
+            bound = fmaxf(bound, fmaxf(fabsf(out[i].x), fmaxf(fabsf(out[i].y), fabsf(out[i].z))));
+        scale = static_position_scale(out, count, 12, bound);
+        if (scale) {
+            int uv = compact_room(count * 36 + 32) && static_uv_params(out, count, sizeof *out, decode);
+            const void *source = out;
+            if (uv) {
+                void *packed_uv = sceGuGetMemory(count * 20);
+                static_uv_copy(out, count, sizeof *out, packed_uv, decode);
+                source = packed_uv;
+            }
+            int head = uv ? 8 : 12;
+            void *packed = sceGuGetMemory(count * (head + 8));
+            static_position_copy(packed, source, count, scale, head);
+            Matrix m = translucent_model;
+            m.right.x *= scale; m.right.y *= scale; m.right.z *= scale;
+            m.up.x *= scale; m.up.y *= scale; m.up.z *= scale;
+            m.at.x *= scale; m.at.y *= scale; m.at.z *= scale;
+            set_matrix(GU_MODEL, &m);
+            if (uv) {
+                bind_texscale(decode);
+                vtype = (vtype & ~GU_TEXTURE_BITS) | GU_TEXTURE_16BIT;
+            } else
+                ge_refused.im3d_float_uv++;
+            vtype = (vtype & ~GU_VERTEX_BITS) | GU_VERTEX_16BIT;
+            draw_vertices = packed;
+            compact_3d_vertices += count;
+        } else
+            ge_refused.im3d_range++;
+    }
+    draw_tested(prims[type], vtype, n, idx, draw_vertices);
+    if (scale) {
+        set_matrix(GU_MODEL, &translucent_model);
+        bind_texscale(0);
+    }
+    draw_site = DS_OTHER;
     if (cull_cards)
         st_enable(GU_CULL_FACE, 0);
     im3d_draws++;
@@ -3183,6 +3846,7 @@ void frFontRasterUploadGlyph(unsigned char *entry, unsigned char *bitmap, int pa
 
 /* Full-screen movies own VRAM only after the last GE list has been presented.
  * Cache entries are disposable, but must not be freed while that list reads them. */
+static unsigned caches_release_all(unsigned *lists, unsigned *proxies, unsigned *cluts);
 int p4_video_renderer_begin(void)
 {
     if (in_frame) func_003f79b0(NULL, NULL, 0);
@@ -3195,6 +3859,13 @@ int p4_video_renderer_begin(void)
     gate_poll();
     gate_at_present = 0;
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    unsigned lists, proxies, cluts, released = caches_release_all(&lists, &proxies, &cluts);
+    p4_log("video renderer idle, released %u bytes of caches (static lists %u, far stand-ins %u, clut8 %u)\n", released, lists, proxies, cluts);
+    return 0;
+}
+/* every cache; the GE must have finished every list that reads them */
+static unsigned caches_release_all(unsigned *lists, unsigned *proxies, unsigned *cluts)
+{
     guard_result_clear();
     ptank_spill_collect(1);
     cloud_clear();
@@ -3206,10 +3877,20 @@ int p4_video_renderer_begin(void)
         for (int i = 0; i < SKIN_GEOMETRIES; i++) skin_free(&skin_cache[i]);
     /* b375: the prepared static lists, far stand-ins and CLUT8 copies too (b373: 13 MB of caches, 9.5 MB of them
        never released, while a battle load was refused 545 KB) */
-    unsigned lists = sl_release_all(), proxies = fp_release_all(), cluts = clut32_release_all();
-    released += lists + proxies + cluts;
-    p4_log("video renderer idle, released %u bytes of caches (static lists %u, far stand-ins %u, clut8 %u)\n", released, lists, proxies, cluts);
-    return 0;
+    *lists = sl_release_all(), *proxies = fp_release_all(), *cluts = clut32_release_all();
+    return released + *lists + *proxies + *cluts;
+}
+static void load_release_check(void)
+{
+    if (!load_release_pending)
+        return;
+    load_release_pending = 0;
+    unsigned t0 = sceKernelGetSystemTimeLow();
+    while ((int)(ge_queued - ge_finished) > 0) /* every queued list done: nothing the GE reads is freed (no list is open) */
+        sceKernelDelayThread(100);
+    unsigned lists, proxies, cluts, released = caches_release_all(&lists, &proxies, &cluts);
+    p4_log("load release: %u bytes of caches (static lists %u, far stand-ins %u, clut8 %u) in %u us\n", released, lists, proxies, cluts,
+           sceKernelGetSystemTimeLow() - t0);
 }
 
 /* b340 (issue #12): the last resort of main.c's malloc wrappers for a big block (F023_003.P01 wanted 1.89 MB with
@@ -3234,6 +3915,6 @@ void p4_video_renderer_end(void)
     skip_debt_us = 0;
     skip_last_us = sceKernelGetSystemTimeLow();
     feedback_captured = 0;
-    texture_generation++;
+    texture_generation++, texture_epoch++;
     gu_dirty();
 }

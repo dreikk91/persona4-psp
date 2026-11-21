@@ -9,7 +9,7 @@ unrolls to exactly the batch's triangles with their winding, and the PSP checks 
 
   python tools/psp_strips.py                       # every skinned geometry of the ISO -> build/psp_dist/.../p4strips.bin
   python tools/psp_strips.py --measure --every 20  # numbers only, a sample
-  python tools/psp_strips.py --static              # also what the static meshes would gain (numbers only)
+  python tools/psp_strips.py --static              # also pack shorter joined strips for static meshes
   python tools/psp_strips.py --lists build/strip_lists.bin   # also the batches' index lists, for tools/test_strippack.c
 
 How a batch is found again on the PSP: the port cuts a mesh into batches of at most 8 bones (skin_geometry in
@@ -198,6 +198,26 @@ def local_list(tris):
         for v in tri:
             out.append(remap.setdefault(v, len(remap)))
     return out
+
+
+def weight_groups(tris, masks):
+    """Candidates for wsplit=2. The PSP checks the exact list key after quantizing weights."""
+    vertices = dict.fromkeys(v for tri in tris for v in tri)
+    uses = collections.Counter(b for v in vertices for b in range(masks[v].bit_length()) if masks[v] >> b & 1)
+    slots = sorted(uses, key=uses.get, reverse=True)
+    needs = {v: max((i + 1 for i, b in enumerate(slots) if masks[v] >> b & 1), default=1) for v in vertices}
+    cuts = [max(needs[v] for v in tri) for tri in tris]
+    counts = collections.Counter(cuts)
+    dest = {}
+    above = max(counts)
+    for c in sorted(counts, reverse=True):
+        if c == above or counts[c] >= 8:
+            above = c
+        dest[c] = above
+    groups = collections.defaultdict(list)
+    for tri, c in zip(tris, cuts):
+        groups[dest[c]].append(tri)
+    return groups.values()
 
 
 # ---- strips -----------------------------------------------------------------------------------------------------------
@@ -439,7 +459,7 @@ def main():
     ap.add_argument('--runs', type=int, default=4, help='stripifier runs a batch, the best kept')
     ap.add_argument('--every', type=int, default=1, help='only every Nth skinned geometry (a sample)')
     ap.add_argument('--measure', action='store_true', help='numbers only, no file')
-    ap.add_argument('--static', action='store_true', help='also measure the static meshes (whole mesh, numbers only)')
+    ap.add_argument('--static', action='store_true', help='include static meshes with a shorter joined strip')
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
     ap.add_argument('--lists', type=Path, help="also write the batches' index lists (the host check reads them; game data)")
     args = ap.parse_args()
@@ -463,11 +483,15 @@ def main():
                             continue
                         strips = arrange(Stripper(tris).run())
                         assert same_triangles(tris, strips)
+                        joined = len(join(strips))
                         n['static triangles'] += len(tris)
                         n['static game indices'] += len(indices)
-                        n['static joined'] += min(len(join(strips)), len(indices))
+                        n['static joined'] += min(joined, len(indices))
                         n['static separate'] += sum(map(len, strips))
                         n['static strips'] += len(strips)
+                        if joined < min(len(indices), len(tris) * 3) and sum(map(len, strips)) < 65536:
+                            flat = [i for tri in tris for i in tri]
+                            entries[struct.pack('<%dH' % len(flat), *flat)] = strips
                 continue
             n['skinned'] += 1
             if n['skinned'] % args.every:
@@ -489,12 +513,15 @@ def main():
                         if len(batch) < 2:  # under 6 corners the port keeps the list
                             continue
                         mine = [tris[t] for t in batch]
-                        local = local_list(mine)
-                        data = struct.pack('<%dH' % len(local), *local)
-                        if data in jobs:
-                            n['batches seen before'] += 1
-                            continue
-                        jobs[data] = name
+                        for group in (mine, *weight_groups(mine, masks)):
+                            if len(group) < 2:
+                                continue
+                            local = local_list(group)
+                            data = struct.pack('<%dH' % len(local), *local)
+                            if data in jobs:
+                                n['batches seen before'] += 1
+                                continue
+                            jobs[data] = name
         if n['files'] % 500 == 0:
             print(f"{n['files']} files, {n['unique geometries']} geometries, {len(jobs)} batches, {time.time() - started:.0f} s", flush=True)
     print(f'{len(jobs)} batches to strip, {time.time() - started:.0f} s', flush=True)

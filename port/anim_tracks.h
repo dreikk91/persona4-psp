@@ -27,7 +27,7 @@
    p4_anim_tracks_reserve bytes of heap left free after it, and tracks not used for TRACK_IDLE ticks (an animation of
    the scene before) are freed. Last resort: a game allocation that fails on the animation thread frees every track
    and is retried (p4_anim_tracks_release, from main.c's malloc wrappers); builds then pause for 10 s. */
-int p4_anim_tracks = 0; /* b272 dialogue, unprofiled: cpu 56.60 / 56.62 / 56.38 / 56.25 ms off/on/off/on: no gain, off */
+int p4_anim_tracks = 1; /* b427: on (PSP b425 Entrance, profiled: frame 51.0 -> 49.5 ms, kinterp 0.69 -> 0.13 M). b272 dialogue, unprofiled: cpu 56.60 / 56.62 / 56.38 / 56.25 ms off/on/off/on: no gain, off */
 int p4_anim_tracks_budget = 1 << 20;
 int p4_anim_tracks_reserve = 3 << 19; /* 1.5 MB: above the mesh cache's 1 MB, so tracks give way first */
 enum { TRACK_IDLE = 90 }; /* ticks, 3 s */

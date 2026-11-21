@@ -118,6 +118,7 @@ static void bind_ge_light_body(const Material *material, int modulate, const Sce
     st_enable(GU_LIGHT1, 0);
     st_enable(GU_LIGHT2, 0);
     st_enable(GU_LIGHT3, 0);
+    unsigned *state = p4_ge_raw ? state_call_begin() : 0;
     if (p4_ge_raw) { /* b366: libpspgu's words (read from its objects): CMAT, AC/AA, model colours EMC DMC AMC SMC */
         ge_word(0x53, GU_AMBIENT);
         ge_word(0x5C, c), ge_word(0x5D, c >> 24);
@@ -139,8 +140,10 @@ static void bind_ge_light_body(const Material *material, int modulate, const Sce
             sceGuLightColor(0, GU_DIFFUSE, diffuse);
             sceGuLightColor(0, GU_AMBIENT, 0);
         }
+        state_call_end(state);
         st_enable(GU_LIGHT0, 1);
     } else {
+        state_call_end(state);
         st_enable(GU_LIGHT0, 0);
     }
 }
@@ -244,7 +247,7 @@ static void draw_mesh_vertices(int prim, int vtype, int count, const void *indic
         st_enable(GU_LIGHTING, 0);
 }
 
-static SceneLight scene_lights(void)
+P4_HOT static SceneLight scene_lights(void)
 {
     SceneLight out = {0};
     unsigned char *ambient = (void *)R32(0x764b64), *directional = (void *)R32(0x764b68);
@@ -266,7 +269,208 @@ static SceneLight scene_lights(void)
    copy in the frame pool: the GE may still be reading the first. Budget-capped; full means build per frame. */
 int p4_shade_fast = 1; /* 0: shade_colour per vertex, as b68 */
 enum { CACHE_SLOTS = 4096 };
-typedef struct { const void *mesh; unsigned key, frame, built; int vertices, indices, capacity, churn, vtype; void *v; unsigned short *idx; int alpha_lo, alpha_hi; } MeshCache;
+#include "strippack.h"
+static const unsigned short *pack_entry(const unsigned short *list, int corners);
+int p4_mesh_strip_pack = 0;
+static unsigned mesh_strip_hits, mesh_strip_saved, skin_group_strip_hits;
+typedef struct { const void *mesh; unsigned key, frame, built; int vertices, indices, capacity, churn, vtype, prim; void *v; unsigned short *idx; int alpha_lo, alpha_hi; } MeshCache;
+
+/* b434 p4_ge_split (EXPERIMENT, for p4_guard_clip 0 as Crisis Core draws): when a mesh's compact copy is cached, every
+   edge longer than p4_ge_split model units is halved at its midpoint, recursively, longest first, so no triangle is
+   big enough for the GE to drop at its 8x guard window or to smear across the screen when it crosses the camera
+   plane. The copy no longer depends on the camera, so a static list made from it needs no CPU guard. A midpoint is
+   shared through an edge map (no T-junctions); corners interpolate UV, colour (per byte) and normal; strips become a
+   list. At most p4_ge_split_grow x the triangles, 65535 indices and MAX_GUARDED vertices, else the mesh stays as it
+   was (counted as refused). Only meshes with a longer edge are touched: characters (GE skin path) never come here and
+   fine geometry stays as it is. Restored from b232's guard_split_mesh (removed in 173f1a7), which split only for a
+   per-chunk proof that kept the CPU guard. 0: off. */
+int p4_ge_split = 0, p4_ge_split_grow = 64; /* counters: rwsky.c, next to the mesh cache's */
+/* b435 p4_ge_split_min L (model units, 0: p4_ge_split itself): only a mesh with an edge longer than L is split, down
+   to p4_ge_split. Heaven: the cloud sea and cloud planes (edges 3893..26357) cross the guard window; everything else
+   (floors 1201, grass 517) the GE takes whole. b434 split all meshes past 1024: 4.9 k -> 39 k triangles, CPU +9 ms
+   through the shared bus. 3800 takes the clouds only. */
+int p4_ge_split_min = 0;
+/* b442 p4_static_gate (static_list.h): while the CPU draws a gated atomic, only these chunks of each mesh */
+static const void *sl_gate_now;
+static int sl_gate_ranges(int mesh, unsigned short *first, unsigned short *count, int max);
+/* the cut chunks of mesh mi: cut on the CPU when the mesh touches the band (clip), else drawn whole */
+static void gate_draw_mesh(int mi, int clip, int prim, const unsigned short *idx, const void *v, int nv, int vtype, const Matrix *model,
+                           float near, const Material *material, int modulate, const SceneLight *light)
+{
+    unsigned short first[64], count[64];
+    int n = sl_gate_ranges(mi, first, count, 64);
+    if (!n)
+        return;
+    void **texture = material->texture;
+    bind_mask(material->colour >> 24);
+    bind_raster(texture ? *texture : 0, GU_REPEAT);
+    for (int k = 0; k < n; k++) {
+        if (clip)
+            draw_guarded_compact(prim, idx + first[k], count[k], v, nv, vtype, model, near, material, modulate, light, 0, 0, 0, 0);
+        else
+            draw_mesh_vertices(prim, vtype, count[k], idx + first[k], v, material, modulate, light);
+    }
+}
+typedef struct { unsigned key; int v; } GeSplitEdge;
+static float ge_split_len2(const char *verts, int stride, int lit, int a, int b)
+{
+    const float *p = (const float *)(verts + a * stride + (lit ? offsetof(Vertex3DN, x) : offsetof(Vertex3D, x)));
+    const float *q = (const float *)(verts + b * stride + (lit ? offsetof(Vertex3DN, x) : offsetof(Vertex3D, x)));
+    float dx = p[0] - q[0], dy = p[1] - q[1], dz = p[2] - q[2];
+    return dx * dx + dy * dy + dz * dz;
+}
+static int ge_split_mid(GeSplitEdge *map, int cap, int a, int b, char *verts, int *nv, int maxv, int stride, int lit)
+{
+    unsigned key = a < b ? (unsigned)a << 16 | b : (unsigned)b << 16 | a;
+    unsigned h = key * 2654435761u & (cap - 1);
+    while (map[h].key && map[h].key != key + 1)
+        h = (h + 1) & (cap - 1);
+    if (map[h].key)
+        return map[h].v;
+    if (*nv >= maxv)
+        return -1;
+    int m = (*nv)++;
+    char *va = verts + a * stride, *vb = verts + b * stride, *vm = verts + m * stride;
+    if (lit) {
+        const Vertex3DN *x = (const Vertex3DN *)va, *y = (const Vertex3DN *)vb;
+        Vertex3DN *o = (Vertex3DN *)vm;
+        o->u = (x->u + y->u) * 0.5f, o->v = (x->v + y->v) * 0.5f;
+        o->nx = (signed char)((x->nx + y->nx) / 2), o->ny = (signed char)((x->ny + y->ny) / 2), o->nz = (signed char)((x->nz + y->nz) / 2), o->pad = 0;
+        o->x = (x->x + y->x) * 0.5f, o->y = (x->y + y->y) * 0.5f, o->z = (x->z + y->z) * 0.5f;
+    } else {
+        const Vertex3D *x = (const Vertex3D *)va, *y = (const Vertex3D *)vb;
+        Vertex3D *o = (Vertex3D *)vm;
+        o->u = (x->u + y->u) * 0.5f, o->v = (x->v + y->v) * 0.5f;
+        o->x = (x->x + y->x) * 0.5f, o->y = (x->y + y->y) * 0.5f, o->z = (x->z + y->z) * 0.5f;
+    }
+    unsigned ca = *(const unsigned *)(va + 8), cb = *(const unsigned *)(vb + 8), cm = 0;
+    for (int k = 0; k < 32; k += 8)
+        cm |= (((ca >> k & 0xff) + (cb >> k & 0xff) + 1) >> 1) << k;
+    *(unsigned *)(vm + 8) = cm;
+    map[h].key = key + 1, map[h].v = m;
+    return m;
+}
+/* A memalign'd buffer: vertices, then the u16 list indices. 0 when no edge is too long or it does not fit. */
+static void *ge_split_mesh(const void *v, int nv, int stride, int lit, const unsigned short *idx, int nidx, int strip,
+                           int *out_nv, int *out_nidx, int *out_bytes)
+{
+    if (p4_ge_split <= 0 || nv <= 0 || nv > MAX_GUARDED || nidx < 3)
+        return 0;
+    float lim2 = (float)p4_ge_split * (float)p4_ge_split;
+    int ntri = strip ? nidx - 2 : nidx / 3;
+    if (ntri > 21845)
+        return 0;
+    float worst = 0; /* b435: the longest edge decides whether the mesh is split at all (p4_ge_split_min) */
+    for (int t = 0; t < ntri; t++) {
+        int a = strip ? idx[t] : idx[t * 3], b = strip ? idx[t + 1] : idx[t * 3 + 1], c = strip ? idx[t + 2] : idx[t * 3 + 2];
+        if (a == b || b == c || a == c)
+            continue;
+        float e0 = ge_split_len2(v, stride, lit, a, b), e1 = ge_split_len2(v, stride, lit, b, c), e2 = ge_split_len2(v, stride, lit, c, a);
+        if (e0 > worst) worst = e0;
+        if (e1 > worst) worst = e1;
+        if (e2 > worst) worst = e2;
+    }
+    float floor2 = p4_ge_split_min > p4_ge_split ? (float)p4_ge_split_min * (float)p4_ge_split_min : lim2;
+    if (!(worst > floor2))
+        return 0;
+    unsigned t0 = sceKernelGetSystemTimeLow();
+    int grow = p4_ge_split_grow < 2 ? 2 : p4_ge_split_grow > 256 ? 256 : p4_ge_split_grow;
+    int maxt = ntri > 21845 / grow ? 21845 : ntri * grow, maxv = nv + maxt; /* PRIM counts are 16 bits */
+    if (maxv > MAX_GUARDED)
+        maxv = MAX_GUARDED;
+    int cap = 1;
+    while (cap < 2 * (maxv - nv) + 16)
+        cap <<= 1;
+    char *verts = malloc(maxv * stride);
+    unsigned short *tris = malloc(maxt * 3 * sizeof *tris);
+    GeSplitEdge *map = calloc(cap, sizeof *map);
+    int (*stack)[3] = malloc(64 * sizeof *stack);
+    int nverts = nv, nt = 0, ok = verts && tris && map && stack;
+    if (ok)
+        memcpy(verts, v, nv * stride);
+    for (int t = 0; t < ntri && ok; t++) {
+        int a, b, c;
+        if (strip) {
+            a = idx[t], b = idx[t + 1], c = idx[t + 2];
+            if (t & 1) { int x = a; a = b; b = x; } /* the GE's alternating winding, as a list */
+        } else
+            a = idx[t * 3], b = idx[t * 3 + 1], c = idx[t * 3 + 2];
+        if (a == b || b == c || a == c)
+            continue;
+        int sp = 0;
+        stack[sp][0] = a, stack[sp][1] = b, stack[sp][2] = c, sp++;
+        while (sp && ok) {
+            sp--;
+            int x = stack[sp][0], y = stack[sp][1], z = stack[sp][2];
+            float e0 = ge_split_len2(verts, stride, lit, x, y), e1 = ge_split_len2(verts, stride, lit, y, z), e2 = ge_split_len2(verts, stride, lit, z, x);
+            int e = -1;
+            float best = lim2;
+            if (e0 > best) best = e0, e = 0;
+            if (e1 > best) best = e1, e = 1;
+            if (e2 > best) best = e2, e = 2;
+            if (e < 0) {
+                if (nt >= maxt) { ok = 0; break; }
+                tris[nt * 3] = x, tris[nt * 3 + 1] = y, tris[nt * 3 + 2] = z, nt++;
+                continue;
+            }
+            if (sp + 2 > 64) { ok = 0; break; }
+            int p = e == 0 ? x : e == 1 ? y : z, q = e == 0 ? y : e == 1 ? z : x, r = e == 0 ? z : e == 1 ? x : y; /* edge p-q, opposite r */
+            int m = ge_split_mid(map, cap, p, q, verts, &nverts, maxv, stride, lit);
+            if (m < 0) { ok = 0; break; }
+            stack[sp][0] = p, stack[sp][1] = m, stack[sp][2] = r, sp++;
+            stack[sp][0] = m, stack[sp][1] = q, stack[sp][2] = r, sp++;
+        }
+    }
+    free(map);
+    free(stack);
+    void *result = 0;
+    int bytes = nverts * stride + nt * 3 * 2;
+    if (ok && nt && (result = memalign(16, bytes))) {
+        memcpy(result, verts, nverts * stride);
+        memcpy((char *)result + nverts * stride, tris, nt * 3 * 2);
+        *out_nv = nverts, *out_nidx = nt * 3, *out_bytes = bytes;
+        ge_split_meshes++, ge_split_tri_in += ntri, ge_split_tri_out += nt;
+    } else
+        ge_split_refused++;
+    static unsigned logged;
+    if (logged < 48) { /* b435: which meshes the rule takes, and what they become */
+        logged++;
+        p4_log("ge split mesh: longest edge %d, %d vertices %d triangles -> %d vertices %d triangles%s\n", (int)sqrtf(worst), nv, ntri,
+               result ? nverts : 0, result ? nt : 0, result ? "" : " (refused: growth cap or memory)");
+    }
+    free(verts);
+    free(tris);
+    ge_split_us += sceKernelGetSystemTimeLow() - t0;
+    return result;
+}
+
+static int mesh_packed_strip(const unsigned short *in, int n, int prim, int vertices, unsigned short *out)
+{
+    if (n < 6 || n >= 65536)
+        return 0;
+    unsigned short *list = malloc((prim == GU_TRIANGLE_STRIP ? 3 * n : n) * sizeof *list);
+    int count = 0, corners = 0;
+    if (list) {
+        if (prim == GU_TRIANGLE_STRIP) {
+            for (int i = 0; i + 2 < n; i++) {
+                unsigned a = in[i + (i & 1)], b = in[i + 1 - (i & 1)], c = in[i + 2];
+                if (a != b && b != c && a != c)
+                    list[corners++] = a, list[corners++] = b, list[corners++] = c;
+            }
+        } else {
+            memcpy(list, in, n * sizeof *list);
+            corners = n;
+        }
+        const unsigned short *entry = corners ? pack_entry(list, corners) : 0;
+        int k = entry ? sp_join(entry, out, n + 3) : 0;
+        if (k && k < n && sp_same(list, corners, out, k, 0, 0, vertices)) {
+            count = k;
+            mesh_strip_hits++, mesh_strip_saved += n - k;
+        }
+    }
+    free(list);
+    return count;
+}
 static MeshCache mesh_cache[CACHE_SLOTS];
 static SceUID cache_thread = -1; /* the drawing thread (b273 p4_mesh_cache_release) */
 volatile int p4_cache_flush_pending; /* b276: set by files.c (the loader may not be the drawing thread) */
@@ -370,7 +574,7 @@ static void churn_report(unsigned frames)
    GCC -O2 may load the words before the caller's float stores (strict aliasing): b104-b108 hashed stale stack words, so
    ~100 cache keys a frame changed at random (Dojima's room 50 -> 75 ms, Heaven differing by 18 ms between builds). */
 typedef unsigned __attribute__((may_alias)) AliasWord;
-static unsigned hash_words(unsigned h, const void *data, int bytes)
+P4_HOT static unsigned hash_words(unsigned h, const void *data, int bytes)
 {
     const AliasWord *w = data;
     for (int i = 0; i < bytes / 4; i++)
@@ -839,7 +1043,9 @@ static void draw_mesh_hit(MeshCache *slot, int prim, const Material *material, i
     prof_end(PROF_HBIND);
     if (draw_static_uv(slot, prim, material, modulate, light)) return;
     draw_slot_v = slot->v, draw_slot_alpha = &slot->alpha_lo;
+    flat_hold = rec != 0; /* b419 */
     draw_mesh_vertices(prim, slot->vtype, slot->indices, slot->idx, slot->v, material, modulate, light);
+    flat_hold = 0;
     draw_slot_v = 0;
     if (rec)
         call_record(rec, h, from, 1);
@@ -915,7 +1121,7 @@ enum { GUARD_EDGES = 1024 };
 static struct { const float *sphere; float edge; } *guard_edges; /* heap: .bss must end below the data image */
 static unsigned guard_small_hits, guard_big_hits;
 static float guard_edge_top[4];
-static float *guard_edge_slot(const float *sphere)
+P4_HOT static float *guard_edge_slot(const float *sphere)
 {
     if (!guard_edges && !(guard_edges = calloc(GUARD_EDGES, sizeof *guard_edges)))
         return 0;
@@ -947,6 +1153,11 @@ static void guard_edge_note(const MeshHeader *header, const V3 *position, int co
         }
     }
     worst = sqrtf(worst);
+    /* b440: a geometry p4_ge_split cuts when it is cached (longest edge past p4_ge_split_min) draws triangles no
+       longer than p4_ge_split: p4_guard_tiny judges that copy, so the split clouds skip the CPU guard while the
+       arena floor (edges below the split floor) keeps it */
+    if (p4_ge_split > 0 && worst > (float)(p4_ge_split_min > p4_ge_split ? p4_ge_split_min : p4_ge_split))
+        worst = (float)p4_ge_split;
     unsigned i = ((unsigned)sphere >> 4) * 2654435761u >> 22;
     guard_edges[i].sphere = sphere, guard_edges[i].edge = worst;
     for (int k = 0; k < 4; k++)
@@ -956,7 +1167,7 @@ static void guard_edge_note(const MeshHeader *header, const V3 *position, int co
         }
 }
 /* 1: this geometry's triangles are all short enough to go to the GE uncut */
-static int guard_small(const Matrix *model, const float *sphere)
+P4_HOT static int guard_small(const Matrix *model, const float *sphere)
 {
     if (!(p4_guard_big > 0 || p4_guard_tiny > 0) || !sphere)
         return 0;
@@ -1000,7 +1211,7 @@ static void guard_big_report(void)
            (int)guard_edge_top[3]);
     guard_small_hits = guard_big_hits = guard_tiny_hits = 0;
 }
-static int replay_unguarded(const Matrix *model, const float *sphere)
+P4_HOT static int replay_unguarded(const Matrix *model, const float *sphere)
 {
     if (!p4_guard_clip || !guard_code)
         return 1;
@@ -1011,7 +1222,7 @@ static int replay_unguarded(const Matrix *model, const float *sphere)
     guard_world_planes();
     return guard_sphere_world(model, sphere, *(float *)((char *)current_camera + CAMERA_NEAR) * 1.01f);
 }
-static int replay_try(MeshHeader *header, const V3 *position, float (*uv)[2], const unsigned *preLit, int count, const Matrix *model, int modulate, const V3 *normals, const float *sphere)
+P4_HOT static int replay_try(MeshHeader *header, const V3 *position, float (*uv)[2], const unsigned *preLit, int count, const Matrix *model, int modulate, const V3 *normals, const float *sphere)
 {
     if (!replay.valid || replay.frame != cache_frame || gu_list->current != replay.end || !gu_mesh_mode)
         return 0;
@@ -1055,6 +1266,7 @@ static int replay_try(MeshHeader *header, const V3 *position, float (*uv)[2], co
     if (ge_work_on)
         work_words(to, to + words);
     mesh_draw_calls += replay.draws;
+    ds_draws[1][DS_IPLAY] += replay.draws; /* b418: counted as indexed (the words of irec draws) */
     replay_draws++;
     draws_since_stall += replay.draws;
     if (draws_since_stall >= (unsigned)p4_draw_batch && !gu_object_stack_depth)
@@ -1091,7 +1303,7 @@ static void replay_record(MeshHeader *header, const V3 *position, float (*uv)[2]
 }
 static SceneLight mesh_state(const Matrix *model, int lit);
 /* the switches a recorded list depends on (instance replays, static and skin lists) */
-static unsigned state_bits(void)
+P4_HOT static unsigned state_bits(void)
 {
     return p4_screen_date | p4_rtt_date << 1 | p4_alpha_pixel << 2 | p4_gs_test << 3 | p4_gs_test_skip << 4 | p4_gs_mesh_alpha << 5 | p4_mipmaps << 6 |
            p4_mesh_call << 7 | p4_guard_clip << 8 | p4_ge_light << 9 | (p4_fog & 3) << 10 | (p4_material_state & 3) << 12;
@@ -1129,7 +1341,9 @@ static void draw_meshes(MeshHeader *header, const V3 *position, float (*uv)[2], 
     if (record)
         memcpy(gs_before, &gs, sizeof gs);
     mesh_model_mark = 0;
+    draw_site = record ? DS_IREC : DS_MESH; /* b418 */
     draw_meshes_body(header, position, uv, preLit, count, model, modulate, normals, sphere);
+    draw_site = DS_OTHER;
     draw_material_ge = 0; /* the body sets it for its compact meshes and may return early */
     if (record)
         replay_record(header, position, uv, preLit, count, model, modulate, normals, sphere, start);
@@ -1344,6 +1558,9 @@ static void draw_meshes_body(MeshHeader *header, const V3 *position, float (*uv)
                     h = hash_words(h, model, 12 * 4); /* rotation rows; position does not light */
                 h = hash_words(h, &nsample, 4);
             }
+            h = hash_words(h, &p4_ge_split, 4); /* b434: a new split length builds new copies */
+            h = hash_words(h, &p4_ge_split_grow, 4);
+            h = hash_words(h, &p4_ge_split_min, 4); /* b435 */
             part[5] = h;
             geometry_key = h | 1;
             if (lm && !lm_hit) {
@@ -1368,6 +1585,8 @@ static void draw_meshes_body(MeshHeader *header, const V3 *position, float (*uv)
             }
         }
         for (int i = 0; i < header->numMeshes; i++, mesh++) {
+            if (sl_gate_now && !sl_gate_ranges(i, 0, 0, 0))
+                continue; /* b442: the list drew all of this mesh */
             if (probe_depth_reject(mesh, position, count, model))
                 continue;
             if (frustum_reject(mesh, count, frustum_ready))
@@ -1417,7 +1636,12 @@ static void draw_meshes_body(MeshHeader *header, const V3 *position, float (*uv)
                     }
                     prof_begin(PROF_HEMPTY); /* the profiler's own cost per section, to subtract */
                     prof_end(PROF_HEMPTY);
-                    int sprim = prim;
+                    int sprim = slot->prim;
+                    if (sl_gate_now) { /* b442: the gated list drew the rest */
+                        gate_draw_mesh(i, clip_this, sprim, slot->idx, slot->v, slot->vertices, slot->vtype, model, near, material, modulate, &light);
+                        prof_end(PROF_HIT);
+                        continue;
+                    }
                     if (clip_this && guard_slot_whole(slot, slot->key, slot->built, sprim, slot->idx, slot->indices, slot->v, slot->vertices, slot->vtype, model, near)) {
                         draw_mesh_hit(slot, sprim, material, modulate, &light); /* b199: no chunk needs the CPU */
                     } else if (clip_this) {
@@ -1527,7 +1751,13 @@ static void draw_meshes_body(MeshHeader *header, const V3 *position, float (*uv)
                 bind_mask(material->colour >> 24);
                 bind_raster(texture ? *texture : 0, GU_REPEAT);
                 draw_material_ge = 0; /* this array has the material in its vertices */
-                draw_guarded(prim, mesh->indices, mesh->numIndices, full, ge_lit ? VT_3D | GU_NORMAL_8BIT : VT_3D, near, material, modulate, &light);
+                if (sl_gate_now) { /* b442 */
+                    unsigned short first[64], cnt[64];
+                    int ng = sl_gate_ranges(i, first, cnt, 64);
+                    for (int r = 0; r < ng; r++)
+                        draw_guarded(prim, mesh->indices + first[r], cnt[r], full, ge_lit ? VT_3D | GU_NORMAL_8BIT : VT_3D, near, material, modulate, &light);
+                } else
+                    draw_guarded(prim, mesh->indices, mesh->numIndices, full, ge_lit ? VT_3D | GU_NORMAL_8BIT : VT_3D, near, material, modulate, &light);
                 draw_material_ge = ge_colour;
                 prof_end(PROF_GDRAW);
                 continue;
@@ -1544,8 +1774,15 @@ static void draw_meshes_body(MeshHeader *header, const V3 *position, float (*uv)
             unsigned stamp = ++mesh_generation;
             int used = 0;
             const unsigned short *in = mesh->indices;
+            int draw_prim = prim;
+            unsigned short *packed = 0;
+            if (p4_mesh_strip_pack && slot && !clip_this && (packed = malloc((n + 3) * sizeof *packed))) {
+                int shorter = mesh_packed_strip(in, n, prim, count, packed);
+                if (shorter)
+                    in = packed, n = shorter, draw_prim = GU_TRIANGLE_STRIP;
+            }
             prof_begin(PROF_EMIT);
-            P4Topology *topology = p4_topology_cache ? p4_topology_get(&topology_cache, mesh, in, n, count,
+            P4Topology *topology = p4_topology_cache && in != packed ? p4_topology_get(&topology_cache, mesh, in, n, count,
                     cache_frame, p4_topology_budget, mesh_remap) : 0;
             const unsigned short *source = topology ? topology->data + n * 2 : 0;
             int iterations = topology ? topology->used : n;
@@ -1574,6 +1811,7 @@ static void draw_meshes_body(MeshHeader *header, const V3 *position, float (*uv)
                 if (!topology)
                     remapped[k] = mesh_remap[j];
             }
+            free(packed);
             vertex_used += (used * stride + 23) / 24;
             index_used += n;
             PROF_COUNT(prof_emitted, used);
@@ -1593,6 +1831,36 @@ static void draw_meshes_body(MeshHeader *header, const V3 *position, float (*uv)
                 slot->churn = 0;
             }
             prof_begin(PROF_MCOPY);
+            int split_nv = 0, split_n = 0, split_bytes = 0;
+            /* b434: built independently of this camera, like the copy itself */
+            void *split = slot && !clip_this ? ge_split_mesh(out, used, stride, ge_lit, remapped, n, draw_prim == GU_TRIANGLE_STRIP,
+                                                             &split_nv, &split_n, &split_bytes) : 0;
+            MeshCache *split_slot = 0;
+            if (split) {
+                if (slot->v) {
+                    cache_bytes -= slot->capacity;
+                    free(slot->v);
+                    slot->v = 0;
+                    slot->capacity = 0;
+                }
+                if (cache_bytes + split_bytes <= p4_cache_budget) {
+                    slot->v = split, slot->capacity = split_bytes, cache_bytes += split_bytes;
+                    slot->idx = (unsigned short *)((char *)split + split_nv * stride);
+                    slot->vtype = vtype;
+                    slot->prim = GU_TRIANGLES;
+                    slot->alpha_lo = -1;
+                    sceKernelDcacheWritebackRange(split, split_bytes);
+                    slot->mesh = mesh, slot->key = key, slot->frame = slot->built = cache_frame;
+                    churn_remember(slot - mesh_cache, part);
+                    slot->vertices = split_nv, slot->indices = split_n;
+                    cache_builds++;
+                    split_slot = slot;
+                    slot = 0; /* handled: not the unsplit copy below */
+                } else { /* b435: over the cache budget: keep the unsplit copy (b434 tried again every frame) */
+                    free(split);
+                    ge_split_refused++;
+                }
+            }
             if (slot) {
                 int need = used * stride + n * 2;
                 if (slot->mesh != mesh)
@@ -1613,6 +1881,7 @@ static void draw_meshes_body(MeshHeader *header, const V3 *position, float (*uv)
                     memcpy(slot->v, out, used * stride);
                     slot->idx = (unsigned short *)((char *)slot->v + used * stride);
                     slot->vtype = vtype;
+                    slot->prim = draw_prim;
                     slot->alpha_lo = -1; /* draw_tested scans it again */
                     memcpy(slot->idx, remapped, n * 2);
                     sceKernelDcacheWritebackRange(slot->v, need);
@@ -1640,10 +1909,14 @@ static void draw_meshes_body(MeshHeader *header, const V3 *position, float (*uv)
             void **texture = material->texture;
             bind_mask(material->colour >> 24);
             bind_raster(texture ? *texture : 0, GU_REPEAT);
-            if (clip_this)
+            if (sl_gate_now) { /* b442: only the cut chunks; the gated list drew the rest */
+                gate_draw_mesh(i, clip_this, draw_prim, remapped, out, used, vtype, model, near, material, modulate, &light);
+            } else if (clip_this)
                 draw_guarded_compact(prim, remapped, n, out, used, vtype, model, near, material, modulate, &light, 0, 0, 0, 0);
+            else if (split_slot) /* b434: the first frame draws the split copy too, not the big triangles */
+                draw_mesh_vertices(GU_TRIANGLES, vtype, split_slot->indices, split_slot->idx, split_slot->v, material, modulate, &light);
             else
-                draw_mesh_vertices(prim, vtype, n, remapped, out, material, modulate, &light);
+                draw_mesh_vertices(draw_prim, vtype, n, remapped, out, material, modulate, &light);
             prof_end(PROF_SUBMIT);
         }
         return;

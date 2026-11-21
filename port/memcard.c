@@ -33,7 +33,10 @@ unsigned p4_mc_calls[6], p4_mc_bytes;
 static int sync_card(void)
 {
 #ifdef __psp__
-    return sceIoSync("ms0:", 0) >= 0;
+    char device[5]; /* the device the saves are on: ms0: or the PSP Go's ef0: (persona4-portable fork, 2ad48b3) */
+    memcpy(device, p4_save_dir, 4);
+    device[4] = '\0';
+    return sceIoSync(device, 0) >= 0;
 #else
     return 1;
 #endif

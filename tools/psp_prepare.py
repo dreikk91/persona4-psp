@@ -122,9 +122,8 @@ def inspect_disc(iso, recipe=None):
         lba, size = top['SLUS_217.82']
         elf = read_range(f, lba * SECTOR, size)
         if recipe is None:
-            from psp_build import RETAIL_SHA1
-            if hashlib.sha1(elf).hexdigest() != RETAIL_SHA1:
-                raise ValueError('Use the original Persona 4 USA executable.')
+            from psp_build import validate_elf
+            validate_elf(elf)
             data, strings = None, None
         else:
             data, strings = apply_recipe(elf, recipe)
@@ -262,7 +261,7 @@ def prepare(iso, output, bundle=BUNDLE, workers=4, *, pspdev=None, build_cache=N
                           strings_sha256=hashes['p4str.bin'])
             eboot = built / 'EBOOT.PBP'
             data, strings = (built / 'p4data.bin').read_bytes(), (built / 'p4str.bin').read_bytes()
-            extras = {name: (built / name, hashes[name]) for name in ('p4strips.bin',) if name in hashes}
+            extras = {name: (built / name, hashes[name]) for name in ('p4strips.bin', 'p4clut.bin') if name in hashes}
         identity = {'iso_sha256': iso_digest, 'eboot_sha256': recipe['eboot_sha256']}
         if source_build:
             identity['source_config_sha256'] = source_identity
@@ -374,7 +373,7 @@ def gui(bundle, *, pspdev=None, build_cache=None, upstream_archive=None, build_o
     window.geometry('820x700')
     frame = ttk.Frame(window, padding=18); frame.pack(fill='both', expand=True)
     ttk.Label(frame, text='Prepare Persona 4 for your PSP', font=('Segoe UI', 16)).pack(anchor='w')
-    ttk.Label(frame, text='Choose your original Persona 4 USA ISO and an output folder.').pack(anchor='w', pady=(8, 16))
+    ttk.Label(frame, text='Choose your Persona 4 USA / supported UNDUB ISO and an output folder.').pack(anchor='w', pady=(8, 16))
     iso, output = tk.StringVar(), tk.StringVar(value=str(Path.home() / 'Persona4-PSP'))
     only_build = tk.BooleanVar(value=build_only)
     selectors = []

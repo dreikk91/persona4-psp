@@ -56,7 +56,7 @@ def make_recipe(elf, data, strings, eboot, build):
 
 def copy_licenses(destination):
     destination.mkdir(parents=True, exist_ok=True)
-    for name in ('av', 'pyinstaller', 'pyinstaller-hooks-contrib', 'imageio-ffmpeg'):
+    for name in ('av', 'pyinstaller', 'pyinstaller-hooks-contrib', 'imageio-ffmpeg', 'Pillow'):
         dist = importlib.metadata.distribution(name)
         for file in dist.files or ():
             if any(word in str(file).lower() for word in ('license', 'copying')) and Path(dist.locate_file(file)).is_file():
@@ -92,7 +92,7 @@ def source_package(root, out):
         source_hashes[relative.as_posix()] = sha256(target)
     number = int(re.search(r'^#define BUILD (\d+)$', (root / 'port/main.c').read_text(), re.M)[1])
     return dict(version=2, mode='source-build', build=number,
-                edition='Persona 4 USA / SLUS-21782', audio_streams=17375, movies=23,
+                edition='Persona 4 USA / supported USA UNDUB / SLUS-21782', audio_streams=17375, movies=23,
                 upstream=dict(commit=UPSTREAM_COMMIT, url=UPSTREAM_URL, tree_sha256=UPSTREAM_TREE_SHA256,
                               hash_format='persona4-upstream-tree-v1'),
                 reference=json.loads((root / 'tools/build_reference.json').read_text(encoding='utf-8')),
@@ -153,7 +153,8 @@ def main():
             subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--windowed',
                 '--name', 'Prepare P4', '--distpath', str(temp / 'dist'), '--workpath', str(temp / 'work'),
                 '--specpath', str(temp), '--paths', str(ROOT / 'tools'), '--collect-all', 'av',
-                '--exclude-module', 'imageio_ffmpeg', '--exclude-module', 'numpy', '--exclude-module', 'PIL',
+                '--exclude-module', 'imageio_ffmpeg', '--exclude-module', 'numpy',
+                '--hidden-import', 'PIL.Image',
                 '--hidden-import', 'tkinter', '--hidden-import', 'tkinter.filedialog', '--hidden-import', 'tkinter.messagebox',
                 '--hidden-import', 'tkinter.ttk', '--add-data', str(ROOT / 'tools/audio_vag_encoder.cs') + ';tools',
                 '--hidden-import', 'runpy', '--hidden-import', 'concurrent.futures.thread',
@@ -184,7 +185,7 @@ def main():
     shutil.copyfile(ROOT / 'LICENSE', out / 'LICENSE')
     shutil.copyfile(ROOT / 'THIRD_PARTY.md', out / 'PROJECT_NOTICES.md')
     (out / 'THIRD_PARTY.md').write_text(
-        'This package includes Python, Tcl/Tk, PyInstaller runtime, PyAV (with its FFmpeg libraries) and vgmstream.\n'
+        'This package includes Python, Tcl/Tk, PyInstaller runtime, PyAV (with its FFmpeg libraries), Pillow and vgmstream.\n'
         'The FFmpeg program is not included: the utility downloads the gyan.dev FFmpeg 9.0.1 essentials build '
         'from https://github.com/GyanD/codexffmpeg/releases/tag/9.0.1 on first use.\n'
         'License texts are in licenses/ and helpers/vgmstream/COPYING.\n'
@@ -193,7 +194,7 @@ def main():
         'where its corresponding source is published next to it.\n'
         'Upstream projects and source: https://www.python.org/ https://www.tcl.tk/ '
         'https://pyinstaller.org/ https://github.com/PyAV-Org/PyAV '
-        'https://ffmpeg.org/ https://github.com/vgmstream/vgmstream '
+        'https://ffmpeg.org/ https://github.com/vgmstream/vgmstream https://github.com/python-pillow/Pillow '
         'https://github.com/pspdev/pspdev https://github.com/pspdev/pspsdk\n'
         'Before public redistribution, supply the corresponding source and notices required '
         'by the exact bundled third-party binaries.\n', encoding='utf-8')

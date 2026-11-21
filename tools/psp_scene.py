@@ -8,6 +8,7 @@
   python tools/psp_scene.py --base 0x08804000 day 5 3 0          # May 3, slot 0 (AM_A): that day's story script
   python tools/psp_scene.py --base 0x08804000 preset "Heaven"    # a line of tools/scenes.txt, by name
   python tools/psp_scene.py --base 0x08804000 menu               # open the L+R+START menu on the PSP
+  python tools/psp_scene.py --base 0x08804000 save               # quick save: the game's save screen, here
   python tools/psp_scene.py --list                               # the presets
   python tools/psp_scene.py days 5/3                             # what May 3's script starts (tools/psp_days.py)
   python tools/psp_scene.py history                              # the PSP's last 30 requests and results
@@ -34,7 +35,7 @@ from psp_data_census import ROOT
 from psp_link import BIN
 
 KINDS = {'field': (1, 2, 4), 'floor': (2, 1, 2), 'event': (3, 2, 3), 'battle': (4, 1, 1), 'menu': (5, 0, 0),
-         'day': (6, 2, 3)}
+         'day': (6, 2, 3), 'save': (7, 0, 0)}
 SLOTS = ('AM_A', 'AM_B', 'PM_A', 'PM_B', 'PM_C', 'PM_D')
 MONTH_DAYS = (30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 28, 31)  # from April: the game's date index 0 is April 1
 
@@ -146,7 +147,7 @@ def main():
             if 'SCENE' in line:
                 print(line.strip(), flush=True)
         start += len(new)
-        if re.search(r'SCENE (field|floor|event|battle|day) .*: (arrived|returned|refused|done|ended|started|the )', new):
+        if re.search(r'SCENE (field|floor|event|battle|day|save) .*: (arrived|returned|refused|done|ended|started|saved|closed|the )', new):
             break
 
 

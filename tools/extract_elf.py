@@ -1,14 +1,13 @@
 #!/usr/bin/env python
 """Pull SLUS_217.82 out of the player's ISO into build/ (read-only on the ISO, game data never ships).
 
-  python tools/extract_elf.py "E:/.../Persona 4 (USA).iso"
+  python tools/extract_elf.py "./Persona 4 (USA).iso"
 """
 import hashlib, struct, sys
 from pathlib import Path
 
 SECTOR = 2048
 NAME = b"SLUS_217.82;1"
-SHA1_PREFIX = "4eeec036"  # docs/port/host_build_census.md section 4
 OUT = Path(__file__).resolve().parent.parent / "build" / "SLUS_217.82"
 
 
@@ -36,7 +35,8 @@ def extract(iso):
 def main():
     data = extract(sys.argv[1])
     sha = hashlib.sha1(data).hexdigest()
-    assert sha.startswith(SHA1_PREFIX), f"unexpected executable {sha}"
+    from psp_build import validate_elf
+    validate_elf(data)
     OUT.write_bytes(data)
     print(f"{OUT} {len(data)} bytes sha1 {sha}")
 

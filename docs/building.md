@@ -1,6 +1,6 @@
 # Building Persona 4 for PSP
 
-These instructions target the current **b249** working-tree sources. Run commands from the root of this port repository in **PowerShell**. Build on a local disk, in a dedicated project folder. Linker response files now quote object paths. Network shares are much slower and have additional path/ownership complications. The [source-build preparation utility](prepare_game.md) automates this pipeline with an isolated local cache.
+These instructions target the current **b450** working-tree sources. Run commands from the root of this port repository in **PowerShell**. Build on a local disk, in a dedicated project folder. Linker response files now quote object paths. Network shares are much slower and have additional path/ownership complications. The [source-build preparation utility](prepare_game.md) automates this pipeline with an isolated local cache.
 
 The aim is to rebuild the port and recreate the installation from your own disc. Bit-for-bit equality with the maintainer's previous b164 binary is not yet guaranteed: compiler, libraries, upstream revision and compiled inputs affect the output. Record the versions and hashes from your own build.
 
@@ -11,7 +11,7 @@ The [2026-11-08 clean-build record](archive/build_validation_b164.md) confirms t
 - Windows x64, Git and Python 3.10 or newer. The maintainer's current environment uses Python 3.14.
 - A **Windows PSPDEV toolchain** with `bin/psp-gcc.exe`, GNU binutils, PSPSDK headers/libraries and `psp-fixup-imports.exe`, `psp-prxgen.exe`, `mksfoex.exe`, `pack-pbp.exe`. The scripts currently invoke `.exe` tools directly; Linux/macOS are not supported by these instructions.
 - A clean checkout of the pinned [Persona 4 decompilation](https://github.com/Raikaru/Persona4-Decompilation), as described below. The PS2 matching compilers, MWCC and the upstream PS2 build are not needed for this PSP build.
-- Your own unmodified **Persona 4 USA** PS2 ISO, containing `SLUS_217.82` with SHA-1 **`4eeec0360cf2715535d9f7e52eb69d786fb0158c`**.
+- Your own **Persona 4 USA** PS2 ISO, containing `SLUS_217.82` with SHA-1 **`4eeec0360cf2715535d9f7e52eb69d786fb0158c`**, or supported USA UNDUB ELF SHA-1 **`e4b3fac598b1d85906d53389dd38baf9b7375ea1`**. Other modified executables are rejected.
 - For audio/video preparation: the Python packages below, a [vgmstream CLI](https://github.com/vgmstream/vgmstream/releases/tag/r2168) Windows x64 installation with its DLLs, and the Windows .NET Framework C# compiler (`Framework64/v4.0.30319/csc.exe`) used to build the included VAG encoder. FFmpeg can come from PATH or imageio-ffmpeg; it needs the encoders used by the converters, including `libx264`.
 - Sufficient PC storage for the ISO, extracted containers, conversion intermediates and final installation. Audio conversion processes over 17,000 streams, so reserve substantially more space than just the EBOOT size.
 - For hardware playback: a homebrew-capable PSP with 64 MB RAM and enough memory-card space for the complete installation. The release sets `MEMSIZE=1`; PSP-1000 support has not been established.
@@ -59,7 +59,7 @@ python tools/extract_elf.py './Shin Megami Tensei - Persona 4 (USA).iso'
 Get-FileHash build/SLUS_217.82 -Algorithm SHA1
 ```
 
-If local PowerShell policy prevents activation, use `.venv/Scripts/python.exe` in place of `python`. The extraction script currently checks only a hash prefix; compare the **full** SHA-1 printed above with the required value before proceeding. Extraction reads the ISO without modifying it.
+If local PowerShell policy prevents activation, use `.venv/Scripts/python.exe` in place of `python`. The extraction script verifies the full executable SHA-1 against the supported USA and UNDUB versions. Extraction reads the ISO without modifying it.
 
 ## 3. Compile the game and build EBOOT.PBP
 
@@ -74,7 +74,7 @@ Get-Content build/census/failed_compile.txt
 
 python tools/psp_ptr_proof.py
 python tools/psp_link.py
-python tools/psp_hw_debug.py --release --out build/release_b249
+python tools/psp_hw_debug.py --release --out build/release_b450
 ```
 
 `failed_compile.txt` must contain no failed filenames before linking. The census script now returns a failing exit code when compilation fails; it also keeps the detailed reports. Do not continue with missing or stale objects.
@@ -89,7 +89,7 @@ What these commands do:
 The final code output is:
 
 ```text
-build/release_b249/
+build/release_b450/
   EBOOT.PBP
   p4.prx
   p4.elf
@@ -119,7 +119,7 @@ python tools/psp_release.py --no-build
 
 The release packager uses `BUILD` from `port/main.c` (currently 249). It checks source/artifact hashes, all 23 complete movie conversions and the complete audio catalogue. If you change a source after step 3, rebuild before packaging. Partial `--seconds` movie probes do not qualify for release packaging.
 
-The complete installation is in **`build/psp_dist/PSP/GAME/P4`**. `build/release_b249/UPDATE/PSP/GAME/P4` contains only an update and requires the archives/index from an existing installation. For a first install, copy the complete installation folder.
+The complete installation is in **`build/psp_dist/PSP/GAME/P4`**. `build/release_b450/UPDATE/PSP/GAME/P4` contains only an update and requires the archives/index from an existing installation. For a first install, copy the complete installation folder.
 
 ## 5. Install on PSP
 

@@ -24,6 +24,16 @@ int main(void)
     ge_swizzle(swizzled, back, 20, 13, 32, 16, 0);
     assert(!memcmp(linear, back, sizeof linear));
     assert(swizzled[ge_swizzle_offset(25, 0, 32)] == 0 && swizzled[ge_swizzle_offset(0, 14, 32)] == 0);
+    /* whole blocks take the 16-byte path: same bytes as the offset formula, and back */
+    unsigned char full[64 * 16], fsw[64 * 16], fback[64 * 16];
+    for (int i = 0; i < (int)sizeof full; i++)
+        full[i] = (unsigned char)(i * 13 + 5);
+    ge_swizzle(fsw, full, 64, 16, 64, 16, 1);
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 64; x++)
+            assert(fsw[ge_swizzle_offset(x, y, 64)] == full[y * 64 + x]);
+    ge_swizzle(fsw, fback, 64, 16, 64, 16, 0);
+    assert(!memcmp(full, fback, sizeof full));
     puts("ge swizzle ok");
     return 0;
 }

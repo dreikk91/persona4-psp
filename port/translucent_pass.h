@@ -16,6 +16,9 @@ typedef struct {
 static LateMesh *late_meshes;
 static unsigned late_count,late_bytes,late_frame;
 static unsigned late_queued,late_drawn,late_refused;
+/* b1394: GE time (p4_exp_ge_time, pipeline off) of the pending instance batch drawn at the flush and of the late
+   meshes, and what the last late mesh was */
+static unsigned late_ge_us,boundary_ge_us,late_last_count,late_last_blend,late_last_w,late_last_h,late_last_test;
 static int late_flushing;
 
 static int translucent_defer(int prim,int vtype,int count,const void *indices,const void *vertices,const Material *material,int modulate)
@@ -63,7 +66,9 @@ static int translucent_defer(int prim,int vtype,int count,const void *indices,co
 static void translucent_flush(void)
 {
 #ifdef TP_BOUNDARY
+    { int timed=late_flushing?0:ge_time_begin();
     TP_BOUNDARY(); /* rwsky.c: a pending instance batch (far_lod.h) is drawn first */
+    boundary_ge_us+=ge_time_end(timed,0); }
 #endif
     if(!late_count||late_flushing)return;
     if(!in_frame){p4_log("late RGB pass lost frame: %u draws\n",late_count);late_count=0;return;}
@@ -77,6 +82,7 @@ static void translucent_flush(void)
     int saved_render[MAX_STATE];unsigned saved_sky[8],saved_mask=pixel_mask;
     memcpy(saved_render,render_state,sizeof saved_render);memcpy(saved_sky,sky_state,sizeof saved_sky);
     void *saved_camera=current_camera;Matrix saved_model=translucent_model;
+    int timed=ge_time_begin();
     for(unsigned i=0;i<late_count;++i){
         const LateMesh *e=&late_meshes[order[i]];
         current_camera=e->camera;pixel_mask=e->mask;
@@ -90,7 +96,10 @@ static void translucent_flush(void)
          * Preserve destination alpha and depth, but keep depth testing/blending. */
         st_alpha_func(GU_ALWAYS,0);st_depth_mask(GU_TRUE);st_pixel_mask(e->mask|0xff000000u);
         gu_draw(e->prim,e->vtype,e->count,0,e->vertices);++late_drawn;
+        late_last_count=e->count;late_last_blend=e->sky[2]&0xff;late_last_test=e->sky[3];
+        late_last_w=e->raster?e->raster->width:0;late_last_h=e->raster?e->raster->height:0;
     }
+    late_ge_us+=ge_time_end(timed,0);
     late_count=0;
     current_camera=saved_camera;pixel_mask=saved_mask;
     memcpy(render_state,saved_render,sizeof saved_render);memcpy(sky_state,saved_sky,sizeof saved_sky);
@@ -102,5 +111,8 @@ static void translucent_report(void)
 {
     p4_log("late RGB pass %d: queued %u drawn %u refused %u per 256 frames\n",
         p4_translucent_late,late_queued,late_drawn,late_refused);
-    late_queued=late_drawn=late_refused=0;
+    if(p4_exp_ge_time||late_ge_us||boundary_ge_us)
+        p4_log("late RGB pass ge_us %u, instance batch at the flush ge_us %u (sums over the window); last mesh %u vertices tex %ux%u blend %02x test %08x\n",
+            late_ge_us,boundary_ge_us,late_last_count,late_last_w,late_last_h,late_last_blend,late_last_test);
+    late_queued=late_drawn=late_refused=late_ge_us=boundary_ge_us=0;
 }

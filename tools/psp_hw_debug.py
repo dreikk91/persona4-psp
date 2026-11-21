@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from psp_data_census import ROOT, load
-from psp_link import PORT, PORT_ASM, LIB_FLAGS, pbp_icons, run, check_import_ranges
+from psp_link import PORT, PORT_ASM, LIB_FLAGS, pbp_icons, run, check_import_ranges, correct_retail_data_symbols
 from psp_make_data import K, PSP_IMAGE, build
 from psp_xref import find_gp
 
@@ -28,7 +28,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=ROOT / "build" / "psplink_diag")
     parser.add_argument("--release", action="store_true", help="Build an XMB release without hardware profiling")
+    parser.add_argument("--asset-packs", type=Path, help="Directory containing p4strips.bin and p4clut.bin")
     args = parser.parse_args()
+    if args.asset_packs and not all((args.asset_packs / name).is_file() for name in ("p4strips.bin", "p4clut.bin")):
+        parser.error("--asset-packs requires both p4strips.bin and p4clut.bin")
     sdkroot = Path(os.environ["PSPDEV"])
     binpath, sdk = sdkroot / "bin", sdkroot / "psp" / "sdk"
     base = ROOT / "build" / "psp"
@@ -67,7 +70,7 @@ def main():
     link_script = link_script.replace("  _end = .;",
         f"  .p4image {PSP_IMAGE - LOAD_BASE:#x} (NOLOAD) : {{ *(.p4image) }}\n  _end = .;")
     (stage / "linkfile.prx").write_text(link_script)
-    symbols = (stage / "symbols.ld").read_text()
+    symbols = correct_retail_data_symbols((stage / "symbols.ld").read_text())  # Rush/Stop anchor (persona4-portable 1d0ceec)
     symbols = re.sub(r"= (0x[0-9a-f]+);", lambda m: f"= {int(m[1], 16) - LOAD_BASE:#x};", symbols)
     (stage / "symbols.ld").write_text(symbols)
     objects = [stage / path.name for path in original_objects]
@@ -79,7 +82,8 @@ def main():
     elf = out / "p4.elf"
     port = [out / f"{name}.o" for name in (*PORT, *PORT_ASM)]
     wraps = ["sdkSpriteRequestLoad", "sceGuGetMemory", "sceGuDrawArray", "sceGeListUpdateStallAddr", "func_00397c40",
-             "malloc", "calloc", "realloc", "memalign", "free"]  # b166 memory census (main.c), as psp_link
+             "malloc", "calloc", "realloc", "memalign", "free",  # b166 memory census (main.c), as psp_link
+             "sceKernelSleepThread"]  # b416 ee.c: every sleep in the watchdog's ring
     if not args.release:
         wraps += ["mdlQueueModelForDraw", "mdlComputeIndexedAttachMatrix", "qsort",
                   "mdlEffectFlushWithTable", "mdlEffectAdvanceAndFlushWithTable",
@@ -88,6 +92,10 @@ def main():
                   "func_003d5bc0", "func_003d5e40", "func_003d5e90", "func_003d5840", "func_003e9680",
                   "p4r_003ed7e0", "func_003e9cb0", "mdlEffectListInvokeEach",  # b263 frame sync, RwFrameTransform
                   "func_003e9700", "p4r_003e9700"]  # b358 RwFrameGetLTM: bone frame census (hanim.h)
+        wraps += [f"sceGu{name}" for name in (  # b431 gu census (rwsky.c gu_census_report)
+            "Enable", "Disable", "StencilFunc", "StencilOp", "AlphaFunc", "DepthMask", "DepthFunc", "PixelMask",
+            "FrontFace", "BlendFunc", "TexFunc", "TexFilter", "TexWrap", "TexMode", "TexImage", "TexFlush", "TexSync",
+            "SetMatrix", "Scissor")]
     run(binpath / "psp-gcc.exe", "-G0", f"-L{sdk / 'lib'}", "-Wl,-zmax-page-size=128",
         f"-specs={sdk / 'lib' / 'prxspecs'}", f"-Wl,-q,-T{(stage / 'linkfile.prx').as_posix()}",
         "-Wl,--allow-multiple-definition", *[f"-Wl,--wrap={name}" for name in wraps],
@@ -111,10 +119,11 @@ def main():
     print(run(binpath / "psp-size.exe", elf).strip())
     destination.mkdir(parents=True, exist_ok=True)
     artifacts = ["p4.elf", "p4.prx", "EBOOT.PBP", data_name, "p4str.bin"]
-    strip_pack = ROOT / "build/psp_dist/PSP/GAME/P4/p4strips.bin"
-    if strip_pack.is_file():
-        shutil.copyfile(strip_pack, out / strip_pack.name)
-        artifacts.append(strip_pack.name)
+    packs = [args.asset_packs / name for name in ("p4strips.bin", "p4clut.bin")] if args.asset_packs else [ROOT / "build/psp_dist/PSP/GAME/P4/p4strips.bin"]
+    for pack in packs:
+        if pack.is_file():
+            shutil.copyfile(pack, out / pack.name)
+            artifacts.append(pack.name)
     for name in artifacts:
         shutil.copyfile(out / name, destination / name)
     for path in (ROOT / "port").glob("*.h"):

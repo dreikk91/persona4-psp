@@ -18,6 +18,11 @@ class QuadMemory(unittest.TestCase):
         self.assertIsNotNone(code)
         self.assertNotIn('memcpy(&p4vu.r[0]', code)
 
+    def test_encoded_vsqrt(self):
+        code = translate(r'"lqc2 $vf2, 0(%0)\n.word 0x4a0203bd\nvwaitq\n" : : "r"(v) : "$vf2", "Q"')
+        self.assertIn('p4_vsqrt(p4vu.vf[2].f[0])', code)
+        self.assertIsNone(translate(r'".word 0x12345678\n"'))
+
     def test_quad_copy_and_memory_constraints(self):
         gcc = shutil.which('gcc')
         if not gcc:

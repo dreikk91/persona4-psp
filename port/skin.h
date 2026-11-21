@@ -62,6 +62,14 @@ int p4_shadow_shear_on(void) { return p4_shadow_shear || p4_shadow_capsule; }
    the head points at the target without the shadow call's sheared one. 0: look-at shadows as b191. */
 int p4_shadow_lookat = 1;
 int p4_shadow_lookat_on(void) { return p4_shadow_lookat || p4_shadow_capsule; }
+/* b403, the field shadow camera (Junes, Living Room: a 128x128 camera texture with the characters' silhouettes,
+   blended over the floor by a quad; PSP b400 Junes: 2 characters 2.4 ms, 7 props 3.0 ms of our drawing a frame).
+   p4_shadow_lod: characters drawn into a camera texture from simplified geometry; 1 keeps p4_shadow_keep % of the
+   triangles (the bones stay), 2 also only p4_skin_far_bones bones. 0: full, as on the screen.
+   p4_shadow_props 0: props (unskinned atomics) are not drawn into camera textures at all: no prop shadows (a look
+   change, for A/B; b327's p4_probe_flags 64 did the same as a diagnostic). */
+int p4_shadow_lod = 0, p4_shadow_keep = 40, p4_shadow_props = 1;
+static unsigned shadow_lod_draws;
 void p4_shadow_shear_set(const void *m)
 {
     if (m) {
@@ -174,6 +182,9 @@ void p4_shadow_check(void *hierarchy, const void *shear, int phase)
 static void shadow_report(unsigned frames)
 {
     capsule_report(frames);
+    if (p4_shadow_lod || !p4_shadow_props) /* b403 */
+        p4_log("field shadow lod %d keep %d props %d: simplified character draws %u per %u frames\n", p4_shadow_lod, p4_shadow_keep, p4_shadow_props, shadow_lod_draws, frames);
+    shadow_lod_draws = 0;
     p4_log("shadow skip %d: %u calls per %u frames; shear %d: %u shadows\n", p4_shadow_skip_on, shadow_skips, frames, p4_shadow_shear,
            shadow_shear_draws), shadow_skips = 0, shadow_shear_draws = 0;
     p4_log("shadow pose vs restored x shear: checked %u match %u bad bones %u worst %d/1e6\n", shadow_post_checked, shadow_post_match,
@@ -339,7 +350,9 @@ static const V3 *skin_vertices_body(const Geometry *g, const Skin *skin, const H
    go to the GE, which skins positions and normals and lights them (bind_ge_light; unlit meshes get the material
    colour through the same path with no light). A skeleton whose sphere may leave the guard band stays on the CPU. */
 int p4_ge_skin = 1; /* 0: every skinned atomic on the CPU, as b76 */
-typedef struct { int mesh, bones, vtype, indices, vertices, wreal, rigid, strip_count, strip_n; unsigned char palette[8]; unsigned char *v; unsigned short *idx, *src, *strip, *strip_lens; int alpha[2]; GeCall call[2]; float uvs[4]; } SkinBatch;
+/* b390 p4_skin_wsplit: a batch's triangles drawn in groups by the weights they need (SkinGroup, skin_wsplit) */
+typedef struct { int vtype, count, prim, nocol; unsigned colour; unsigned char *v; unsigned short *idx; } SkinGroup;
+typedef struct { int mesh, bones, vtype, indices, vertices, wreal, rigid, strip_count, strip_n; unsigned char palette[8]; unsigned char *v; unsigned short *idx, *src, *strip, *strip_lens; int alpha[2]; GeCall call[2]; float uvs[4]; int ngroups, wslotv; SkinGroup *grp; } SkinBatch;
 typedef struct { const Geometry *g; const V3 *verts; int vertices, lit, nrm, batches, nradius, packed, nmap; unsigned sample, frame, bytes, used[8]; SkinBatch *batch; float *radius, *box; unsigned short regroup[8]; float pack[4]; unsigned char *bone_map; float *bone_len; void *list; } SkinGeometry;
 enum { SKIN_GEOMETRIES = 64, SKIN_PALETTE = 8 };
 static SkinGeometry *skin_cache; /* heap: .bss is full */
@@ -382,23 +395,28 @@ int p4_skin_pack = 1; /* 0: float positions and UVs, as b204 */
    triangle with more bones than the cap still starts a batch of its own. In the cache key. */
 int p4_skin_palette = 8;
 typedef struct { int uv, colour, normal, position, stride; } SkinLayout;
-static SkinLayout skin_layout(int bones, int lit, int packed)
+/* colour 0 (b391 p4_skin_nocolour): no 8888 colour; packed, the stride is then x2 (u16 the biggest element) */
+static SkinLayout skin_layout_c(int bones, int lit, int packed, int colour)
 {
     SkinLayout l;
     if (packed) { /* GE order u8 weights, u16 UV, 8888 colour, s8 normal, s16 position; each at its own size, stride x4 */
         l.uv = (bones + 1) & ~1;
-        l.colour = (l.uv + 4 + 3) & ~3;
-        l.normal = l.colour + 4;
+        l.colour = colour ? (l.uv + 4 + 3) & ~3 : -1;
+        l.normal = colour ? l.colour + 4 : l.uv + 4;
         l.position = l.normal + (lit ? 4 : 0);
-        l.stride = (l.position + 6 + 3) & ~3;
+        l.stride = colour ? (l.position + 6 + 3) & ~3 : (l.position + 6 + 1) & ~1;
     } else {
         l.uv = (bones + 3) & ~3;
-        l.colour = l.uv + 8;
-        l.normal = l.colour + 4;
+        l.colour = colour ? l.uv + 8 : -1;
+        l.normal = l.uv + 8 + (colour ? 4 : 0);
         l.position = l.normal + (lit ? 4 : 0);
         l.stride = l.position + 12;
     }
     return l;
+}
+static SkinLayout skin_layout(int bones, int lit, int packed)
+{
+    return skin_layout_c(bones, lit, packed, 1);
 }
 /* a batch vertex's bind position and UV as floats (pack 0: stored as floats) */
 static void skin_vertex_read(const unsigned char *in, const SkinLayout *l, const float *pack, const float *uvs, V3 *bind, float uv[2])
@@ -484,8 +502,12 @@ static void sk_free(void *list);
 static void skin_free(SkinGeometry *e)
 {
     sk_free(e->list), e->list = 0;
-    for (int b = 0; b < e->batches; b++)
-        free(e->batch[b].v), free(e->batch[b].src), free(e->batch[b].strip), free(e->batch[b].strip_lens);
+    for (int b = 0; b < e->batches; b++) {
+        SkinBatch *k = &e->batch[b];
+        for (int i = 0; i < k->ngroups; i++)
+            free(k->grp[i].v), free(k->grp[i].prim == GU_TRIANGLE_STRIP ? k->grp[i].idx : 0);
+        free(k->grp), free(k->v), free(k->src), free(k->strip), free(k->strip_lens);
+    }
     free(e->batch);
     free(e->radius);
     free(e->box);
@@ -858,6 +880,239 @@ static int weld_cmp(const void *a, const void *b) /* by position bits, then inde
     return c ? c : i - j;
 }
 
+/* b390 p4_skin_wsplit: the GE blends every weight a VTYPE names, zeros too (b206 battle: ~1.1 nonzero of ~6.2
+   blended a vertex). A triangle whose corners use only slots 0..c-1 is drawn with GU_WEIGHTS(c): the batch's
+   triangles go into groups by c, each with its own vertex copy at that stride, one PRIM each, the same bone
+   matrices. Groups under WS_MIN triangles join the next bigger group (a PRIM costs words and GE setup). b->v and
+   b->idx stay for the CPU path, the env pass and p4_skin_diff; the groups cost extra memory (logged). */
+/* b391, as Burnout Legends draws its skins (one VTYPE: u8 weights, u16 UV, s8 normal, s16 position, no colour, no
+   index; a PRIM a strip). Both go into the same GE copy as the weight groups (with wsplit 0: one group, every weight).
+   p4_skin_nocolour: a lit batch whose vertex colours are all 0xff000000 drops them (4 bytes a vertex); the GE takes
+   the ambient material from AMC/AMA instead, set to that value around the draw (CMAT is GU_AMBIENT).
+   p4_skin_flat: each group's vertices written in strip order and drawn without an index list. */
+int p4_skin_wsplit = 2, p4_skin_nocolour = 1, p4_skin_flat = 1; /* b400: on by the user's choice; wsplit 2 (PSP Entrance, everything flat + double lists: 50.5 -> 42.5 ms). b399: off. b398: nocolour and flat on (PSP b396 Entrance: CPU -5 ms; originals dropped) */
+/* b398 p4_skin_drop_original: once a batch has its GE groups, free its original vertices, indices and strip (the static
+   lists free theirs the same way, sl_flatten). Their rare other readers then skip the batch: the CPU path (bones with a
+   non-finite matrix, p4_skin_split 2), the GE env pass (p4_matfx_env_ge) and p4_skin_diff. Counted as skin_cpu_dropped. */
+int p4_skin_drop_original = 1;
+int p4_skin_census = 1; /* b413: SKINC lines, see skin_geometry's end */
+static unsigned skin_dropped_bytes, skin_cpu_dropped;
+enum { WS_MIN = 8 };
+static unsigned ws_batches, ws_groups, ws_bytes, ws_before, ws_after, ws_nocol, ws_flat;
+/* b406 p4_wsplit3_census: what a p4_skin_wsplit 3 would give, counted when batches are built. Mode 3: each group of
+   triangles gets its own slots, only the bones it uses (its mask over the batch palette), so GU_WEIGHTS(bits of the
+   mask) whatever slots they held; before each group the GE takes the bones not already in a slot below that count
+   (12 words each, every frame). Groups by exact mask, the biggest first; a bone already in one of the group's low
+   slots stays. Logged next to the "skin wsplit" line: weights x vertices (compare with its "-> after") and uploads. */
+int p4_wsplit3_census = 0;
+static unsigned w3_batches, w3_groups, w3_weights, w3_uploads, w3_tris;
+static void wsplit3_census(const SkinBatch *b, const SkinLayout *lo, int bones, int *stamp)
+{
+    int ntri = b->indices / 3;
+    unsigned char *vmask = malloc(b->vertices);
+    if (!vmask)
+        return;
+    for (int i = 0; i < b->vertices; i++) {
+        const unsigned char *w = b->v + lo->stride * i;
+        unsigned m = 0;
+        for (int s = 0; s < bones; s++)
+            if (w[s])
+                m |= 1u << s;
+        vmask[i] = m ? m : 1;
+    }
+    unsigned count[256] = { 0 };
+    for (int t = 0; t < ntri; t++)
+        count[vmask[b->idx[3 * t]] | vmask[b->idx[3 * t + 1]] | vmask[b->idx[3 * t + 2]]]++;
+    int slot[8];
+    for (int s = 0; s < 8; s++)
+        slot[s] = s < bones ? s : -1; /* the batch palette as mode 2 loads it */
+    for (;;) {
+        int m = -1;
+        for (int k = 1; k < 256; k++)
+            if (count[k] && (m < 0 || count[k] > count[m]))
+                m = k;
+        if (m < 0)
+            break;
+        int k = __builtin_popcount(m), used = 0;
+        for (int i = 0; i < b->vertices; i++)
+            stamp[i] = 0;
+        for (int t = 0; t < ntri; t++)
+            if ((vmask[b->idx[3 * t]] | vmask[b->idx[3 * t + 1]] | vmask[b->idx[3 * t + 2]]) == m)
+                for (int j = 0; j < 3; j++)
+                    if (!stamp[b->idx[3 * t + j]])
+                        stamp[b->idx[3 * t + j]] = 1, used++;
+        w3_weights += (unsigned)(k * used);
+        w3_tris += count[m];
+        unsigned placed = 0; /* the mask's bones already in a slot below k */
+        for (int s = 0; s < k; s++)
+            if (slot[s] >= 0 && (m >> slot[s] & 1))
+                placed |= 1u << slot[s];
+        for (int bone = 0, s = 0; bone < 8; bone++) {
+            if (!(m >> bone & 1) || (placed >> bone & 1))
+                continue;
+            while (s < k && slot[s] >= 0 && (m >> slot[s] & 1))
+                s++;
+            if (s < k)
+                slot[s] = bone, w3_uploads++, s++;
+        }
+        w3_groups++;
+        count[m] = 0;
+    }
+    w3_batches++;
+    free(vmask);
+}
+
+static int skin_wsplit(SkinGeometry *e, SkinBatch *b)
+{
+    int bones = b->bones, ntri = b->indices / 3;
+    if (ntri < 1 || (bones < 2 && !p4_skin_nocolour && !p4_skin_flat))
+        return 0;
+    SkinLayout lo = skin_layout(bones, e->nrm, e->packed);
+    /* b395: any one colour for the whole batch, lit or not (census: 98-100% of skinned vertices); the GE takes it
+       from AMC/AMA, as the ambient material when lit (CMAT GU_AMBIENT) and as the colour when not */
+    int nocol = p4_skin_nocolour != 0, flat = p4_skin_flat != 0;
+    unsigned first = 0;
+    memcpy(&first, b->v + lo.colour, 4);
+    for (int i = 1; i < b->vertices && nocol; i++) {
+        unsigned colour;
+        memcpy(&colour, b->v + lo.stride * i + lo.colour, 4);
+        nocol = colour == first;
+    }
+    unsigned char *need = malloc(b->vertices + ntri), *tc = need + b->vertices;
+    int *map = malloc(b->vertices * sizeof *map);
+    unsigned short *list = malloc(b->indices * sizeof *list);
+    if (!need || !map || !list) {
+        free(need), free(map), free(list);
+        return 0;
+    }
+    for (int i = 0; i < b->vertices; i++) {
+        const unsigned char *w = b->v + lo.stride * i;
+        int c = 1;
+        for (int s = 0; s < bones; s++)
+            if (w[s])
+                c = s + 1;
+        need[i] = c;
+    }
+    if (p4_wsplit3_census)
+        wsplit3_census(b, &lo, bones, map);
+    int count[9] = { 0 }, dest[9];
+    for (int t = 0; t < ntri; t++) {
+        int c = need[b->idx[3 * t]];
+        if (need[b->idx[3 * t + 1]] > c) c = need[b->idx[3 * t + 1]];
+        if (need[b->idx[3 * t + 2]] > c) c = need[b->idx[3 * t + 2]];
+        if (!p4_skin_wsplit)
+            c = bones;
+        tc[t] = c, count[c]++;
+    }
+    int top = bones;
+    while (!count[top])
+        top--;
+    for (int c = 0; c <= 8; c++)
+        dest[c] = c;
+    for (int c = top - 1, above = top; c >= 1; c--) {
+        if (!count[c])
+            continue;
+        if (count[c] < WS_MIN)
+            dest[c] = above, count[above] += count[c], count[c] = 0;
+        else
+            above = c;
+    }
+    int groups = 0;
+    for (int c = 1; c <= top; c++)
+        groups += count[c] != 0;
+    SkinGroup *grp = groups > 1 || top < bones || nocol || flat ? calloc(groups, sizeof *grp) : 0;
+    int ok = grp != 0, k = 0, bytes = 0;
+    unsigned after = 0;
+    for (int c = 1; c <= top && ok; c++) {
+        if (!count[c])
+            continue;
+        SkinGroup *gr = &grp[k++];
+        int n = 0, used = 0;
+        for (int i = 0; i < b->vertices; i++)
+            map[i] = -1;
+        for (int t = 0; t < ntri; t++)
+            if (dest[tc[t]] == c)
+                for (int j = 0; j < 3; j++) {
+                    int vi = b->idx[3 * t + j];
+                    if (map[vi] < 0)
+                        map[vi] = used++;
+                    list[n++] = map[vi];
+                }
+        SkinLayout ln = skin_layout_c(c, e->nrm, e->packed, !nocol);
+        int size = ln.stride * used + n * 2;
+        if (!(gr->v = memalign(16, size))) {
+            ok = 0;
+            break;
+        }
+        for (int i = 0; i < b->vertices; i++) {
+            if (map[i] < 0)
+                continue;
+            const unsigned char *in = b->v + lo.stride * i;
+            unsigned char *out = gr->v + ln.stride * map[i];
+            memset(out, 0, ln.stride);
+            memcpy(out, in, c); /* the slots above c are zero for these corners */
+            memcpy(out + ln.uv, in + lo.uv, e->packed ? 4 : 8);
+            if (!nocol)
+                memcpy(out + ln.colour, in + lo.colour, 4);
+            if (e->nrm)
+                memcpy(out + ln.normal, in + lo.normal, 4);
+            memcpy(out + ln.position, in + lo.position, e->packed ? 6 : 12);
+        }
+        gr->idx = (unsigned short *)(gr->v + ln.stride * used);
+        memcpy(gr->idx, list, n * 2);
+        gr->prim = GU_TRIANGLES, gr->count = n, gr->nocol = nocol, gr->colour = first;
+        gr->vtype = (b->vtype & ~GU_WEIGHTS_BITS & ~(nocol ? GU_COLOR_BITS : 0)) | GU_WEIGHTS(c);
+        int strip_bytes = 0;
+        if (p4_skin_strip && n >= 6) {
+            int cap = 6 * (n / 3) + 6;
+            unsigned short *strip = malloc(cap * sizeof *strip);
+            int sn = 0;
+            const unsigned short *entry = strip && p4_mesh_strip_pack && p4_strip_pack ? pack_entry(gr->idx, n) : 0;
+            if (entry) {
+                sn = sp_join(entry, strip, cap);
+                if (sn >= n || !sp_same(gr->idx, n, strip, sn, 0, 0, used))
+                    sn = 0;
+                skin_group_strip_hits += sn != 0;
+            }
+            if (!sn && strip)
+                sn = skin_stripify(gr->idx, n, strip, 0);
+            if (sn && sn < n) {
+                gr->idx = strip, gr->prim = GU_TRIANGLE_STRIP, gr->count = sn;
+                strip_bytes = sn * 2;
+            } else
+                free(strip);
+        }
+        unsigned char *fv = flat ? memalign(16, gr->count * ln.stride) : 0;
+        if (fv) { /* the vertices in drawing order: no index list */
+            for (int i = 0; i < gr->count; i++)
+                memcpy(fv + ln.stride * i, gr->v + ln.stride * gr->idx[i], ln.stride);
+            if (gr->prim == GU_TRIANGLE_STRIP)
+                free(gr->idx);
+            free(gr->v);
+            gr->v = fv, gr->idx = 0, gr->vtype &= ~GU_INDEX_BITS;
+            size = gr->count * ln.stride, strip_bytes = 0;
+            ws_flat++;
+        }
+        if (gr->idx && gr->prim == GU_TRIANGLE_STRIP)
+            sceKernelDcacheWritebackRange(gr->idx, strip_bytes);
+        sceKernelDcacheWritebackRange(gr->v, size);
+        bytes += size + strip_bytes;
+        after += (unsigned)(c * (fv ? gr->count : used));
+        ws_nocol += nocol;
+    }
+    free(need), free(map), free(list);
+    if (!ok) {
+        for (int i = 0; grp && i < k; i++)
+            free(grp[i].v), free(grp[i].prim == GU_TRIANGLE_STRIP ? grp[i].idx : 0);
+        free(grp);
+        return 0;
+    }
+    b->grp = grp, b->ngroups = groups, b->wslotv = after;
+    ws_batches++, ws_groups += groups, ws_bytes += bytes;
+    ws_before += bones * b->vertices, ws_after += after;
+    return bytes;
+}
+
 static int skin_batch(SkinGeometry *e, int mesh, const unsigned char *palette, int bones, const int *tri, int corners,
                       const Geometry *g, const Skin *skin, int nbones)
 {
@@ -884,6 +1139,27 @@ static int skin_batch(SkinGeometry *e, int mesh, const unsigned char *palette, i
     b->mesh = mesh;
     b->bones = bones;
     memcpy(b->palette, palette, bones);
+    if (p4_skin_wsplit == 2 && bones > 1) { /* b390: the busiest bones in the low slots (draw_skinned_ge resends a moved bone) */
+        int uses[SKIN_PALETTE] = { 0 };
+        unsigned st = ++mesh_generation;
+        for (int k = 0; k < corners; k++) {
+            if (mesh_stamp[tri[k]] == st)
+                continue;
+            mesh_stamp[tri[k]] = st;
+            unsigned char bn[4];
+            float wt[4];
+            int n = vertex_bones(skin, nbones, tri[k], bn, wt);
+            for (int w = 0; w < n; w++)
+                for (int s = 0; s < bones; s++)
+                    uses[s] += wt[w] > 0 && b->palette[s] == bn[w];
+        }
+        for (int i = 1; i < bones; i++) /* insertion sort, descending uses */
+            for (int j = i; j > 0 && uses[j] > uses[j - 1]; j--) {
+                int u = uses[j]; uses[j] = uses[j - 1]; uses[j - 1] = u;
+                unsigned char p = b->palette[j]; b->palette[j] = b->palette[j - 1]; b->palette[j - 1] = p;
+            }
+        palette = b->palette;
+    }
     b->vtype = GU_WEIGHTS(bones) | GU_WEIGHT_8BIT | (e->packed ? GU_TEXTURE_16BIT | GU_VERTEX_16BIT : GU_TEXTURE_32BITF | GU_VERTEX_32BITF) | GU_COLOR_8888 |
                (e->nrm ? GU_NORMAL_8BIT : 0) | GU_INDEX_16BIT | GU_TRANSFORM_3D;
     b->v = v;
@@ -1030,6 +1306,16 @@ static int skin_batch(SkinGeometry *e, int mesh, const unsigned char *palette, i
             free(strip), free(lens);
     }
     sceKernelDcacheWritebackRange(v, bytes - b->strip_count * (int)sizeof *b->strip);
+    if (p4_skin_wsplit || p4_skin_nocolour || p4_skin_flat) {
+        int ws = skin_wsplit(e, b);
+        if (b->grp && p4_skin_drop_original) { /* b398: the GE draws only the groups; the original goes */
+            free(b->v), free(b->src), free(b->strip), free(b->strip_lens);
+            b->v = 0, b->idx = b->src = b->strip = b->strip_lens = 0, b->strip_count = b->strip_n = 0;
+            skin_dropped_bytes += bytes;
+            bytes = ws;
+        } else
+            bytes += ws;
+    }
     e->bytes += bytes;
     skin_ge_bytes += bytes;
     return 1;
@@ -1191,6 +1477,20 @@ static void batch_stats_add(const SkinGeometry *e, int shadow, unsigned sent)
 void p4_batch_stats_report(void)
 {
     p4_log("skin batches sticky %d regroup %d regrouped batches built %u\n", p4_skin_sticky, p4_skin_regroup, skin_regrouped);
+    if (p4_mesh_strip_pack)
+        p4_log("offline strips: static hits %u indices saved %u, skin group hits %u\n", mesh_strip_hits, mesh_strip_saved, skin_group_strip_hits);
+    if (p4_skin_wsplit || p4_skin_nocolour || p4_skin_flat) /* b390: built since the last line; weight slots x vertices before -> after */
+        p4_log("skin wsplit %d nocolour %d flat %d batches %u groups %u bytes %u wslotv %u -> %u nocol groups %u flat groups %u\n",
+               p4_skin_wsplit, p4_skin_nocolour, p4_skin_flat, ws_batches, ws_groups, ws_bytes, ws_before, ws_after, ws_nocol, ws_flat);
+    if (p4_wsplit3_census) /* b406: mode 3 for the same batches: weights x vertices (against "-> after" above), uploads */
+        p4_log("skin wsplit3 census: batches %u groups %u tris %u weights x vertices %u, bone uploads %u (%u.%02u a batch draw)\n",
+               w3_batches, w3_groups, w3_tris, w3_weights, w3_uploads, w3_batches ? w3_uploads / w3_batches : 0,
+               w3_batches ? w3_uploads * 100 / w3_batches % 100 : 0);
+    w3_batches = w3_groups = w3_weights = w3_uploads = w3_tris = 0;
+    if (p4_skin_drop_original) /* b398: original bytes freed for the groups since the last line; CPU-path batches left out */
+        p4_log("skin originals dropped: bytes %u, cpu batches skipped %u\n", skin_dropped_bytes, skin_cpu_dropped);
+    skin_dropped_bytes = skin_cpu_dropped = 0;
+    ws_batches = ws_groups = ws_bytes = ws_before = ws_after = ws_nocol = ws_flat = 0;
     skin_regrouped = 0;
     if (!p4_batch_stats || !batch_stats)
         return;
@@ -1254,7 +1554,7 @@ static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbon
         return 0;
     const V3 *verts = g->morphTarget->verts;
     unsigned sample = hash_sample(2166136261u, verts, g->numVertices, sizeof *verts);
-    sample ^= (unsigned)(p4_skin_sticky | p4_skin_regroup << 1 | (p4_skin_pack != 0) << 3 | (unsigned)p4_skin_palette << 12 | (unsigned)p4_skin_strip << 16 | (unsigned)skin_simplify_now << 18 | (p4_mesh_override != 0) << 25 | (p4_strip_pack != 0) << 26 | (p4_strip_prims != 0) << 27) * 0x9e3779b1u; /* b199: a switch poke builds the new shape */
+    sample ^= (unsigned)(p4_skin_sticky | p4_skin_regroup << 1 | (p4_skin_pack != 0) << 3 | (unsigned)p4_skin_palette << 12 | (unsigned)p4_skin_strip << 16 | (unsigned)skin_simplify_now << 18 | (p4_mesh_override != 0) << 25 | (p4_strip_pack != 0) << 26 | (p4_strip_prims != 0) << 27 | (unsigned)p4_skin_wsplit << 28 | (unsigned)(p4_skin_nocolour != 0) << 30 | (unsigned)(p4_skin_flat != 0) << 31) * 0x9e3779b1u; /* b199: a switch poke builds the new shape */
     sample ^= skin_simplify_now ? (unsigned)p4_skin_lod_min * 0xc2b2ae35u : 0;
     sample ^= (unsigned)skin_bones_now * 0x85ebca6bu; /* b254: the far entry is another shape */
     SkinGeometry *spare = 0;
@@ -1608,6 +1908,12 @@ static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbon
         skin_far_us += build_us;
     if (build_us > skin_build_max_us)
         skin_build_max_us = build_us, skin_build_max_v = g->numVertices;
+    /* b413 p4_skin_census (docs/offline_caches.md): one line a build, for offline skin batches: which variants
+       (lit, normals, bones, far/simplified) a geometry is built in, how often it is rebuilt, its bytes and cost */
+    if (p4_skin_census)
+        p4_log("SKINC key %08x v %d meshes %d skin_bones %d nodes %d nbones %d lit %d nrm %d far %d simp %d batches %d bytes %u us %u\n",
+               mk_key_g, g->numVertices, header->numMeshes, skin->numBones, hierarchy_nodes_seen, nbones, lit, nrm, skin_bones_now,
+               skin_simplify_now, e->batches, e->bytes, build_us);
     return e->batches ? e : 0; /* a failed build stays as an empty entry: the CPU path, without retrying every frame */
 }
 
@@ -1793,6 +2099,7 @@ static int skin_call_key(const SkinBatch *b, const Material *m, int modulate, co
        same batch, vertex and list addresses (free then malloc of the same sizes, as when a battle loads) replayed
        the old record with the address of a strip that had been freed. */
     w[n++] = (unsigned)b->strip, w[n++] = b->strip_count | b->strip_n << 16; /* b250: and how many PRIMs it was recorded as */
+    w[n++] = (unsigned)b->grp; /* b390: drawn as weight groups */
     call_key(w, n, h);
     return 1;
 }
@@ -2007,8 +2314,86 @@ static void skin_env_ge(const unsigned char *e, const Material *material, int mo
     sceGuTexMapMode(GU_TEXTURE_COORDS, 0, 0);
     matfx_env_ge_draws++;
 }
+/* b409 p4_anim_trace: once a drawn frame per visible hierarchy, its current clip (currentAnim's animation) and time;
+   a clip change, or a time going back that is not a loop's wrap, is logged: where a moment of animation plays again
+   (Margaret's book lift). 1: those (400 lines); 2: loop wraps too; p4_anim_trace_h: that hierarchy's pose every drawn
+   frame. b410, 3 (an empty ANIMTRACE file next to the EBOOT, release builds too): changes and backward times, the
+   pose of a hierarchy for AT_WATCH drawn frames after each of its clip changes, and a one-shot clip that wrapped just
+   before its change ("wrap before switch"); 6000 lines. Off by default. */
+int p4_anim_trace = 0;
+unsigned p4_anim_trace_h; /* b409: a hierarchy whose pose is logged every drawn frame (TRACE pose) */
+enum { AT_SLOTS = 32, AT_WATCH = 45 };
+static struct { const void *h, *anim; float t; unsigned frame, watch_until, wrap_frame, pose_frame; } at_slot[AT_SLOTS];
+static unsigned at_logged;
+static void anim_trace_pose(const Hierarchy *h, const void *anim, float t)
+{
+    if (!h->matrices || h->numNodes <= 0)
+        return;
+    float sx = 0, sy = 0, sz = 0, top = -1e30f;
+    for (int i = 0; i < h->numNodes; i++) {
+        const V3 *p = &h->matrices[i].pos;
+        sx += p->x, sy += p->y, sz += p->z;
+        if (p->y > top)
+            top = p->y;
+    }
+    float n = (float)h->numNodes;
+    at_logged++;
+    p4_log("TRACE pose h %p frame %u clip %p t %d mean %d %d %d top %d skip_run %d\n", h, cache_frame, anim, (int)(t * 1000),
+           (int)(sx / n * 1000), (int)(sy / n * 1000), (int)(sz / n * 1000), (int)(top * 1000), skip_run);
+}
+static void anim_trace(const Hierarchy *h)
+{
+    const char *ip = (const char *)((void *const *)h)[8];
+    if (!ip)
+        return;
+    const void *anim = *(void *const *)ip;
+    float t = *(const float *)(ip + 4);
+    unsigned cap = p4_anim_trace == 3 ? 6000 : 2000;
+    int free_i = -1;
+    for (int i = 0; i < AT_SLOTS; i++) {
+        if (at_slot[i].h == h) {
+            if (at_slot[i].frame == cache_frame)
+                return;
+            float dur = anim ? *(const float *)((const char *)anim + 0xC) : 0;
+            int wrap = anim == at_slot[i].anim && t < at_slot[i].t - 0.001f && at_slot[i].t > dur - 0.1f && t < 0.1f;
+            int back = anim == at_slot[i].anim && t < at_slot[i].t - 0.001f && (p4_anim_trace == 2 || !wrap);
+            int change = anim != at_slot[i].anim;
+            if (at_logged < cap && (change || back)) {
+                at_logged++;
+                p4_log("TRACE anim %s h %p clip %p -> %p t %d -> %d ms dur %d ms frame %u skip_run %d\n", change ? "switch" : "back",
+                       h, at_slot[i].anim, anim, (int)(at_slot[i].t * 1000), (int)(t * 1000), (int)(dur * 1000), cache_frame, skip_run);
+            }
+            if (p4_anim_trace == 3) {
+                if (change && at_slot[i].wrap_frame && cache_frame - at_slot[i].wrap_frame <= 10 && at_logged < cap) {
+                    at_logged++;
+                    p4_log("TRACE anim wrap before switch h %p clip %p wrapped at frame %u, switched at %u\n", h, at_slot[i].anim,
+                           at_slot[i].wrap_frame, cache_frame);
+                }
+                if (wrap)
+                    at_slot[i].wrap_frame = cache_frame;
+                else if (change)
+                    at_slot[i].wrap_frame = 0;
+                if (change)
+                    at_slot[i].watch_until = cache_frame + AT_WATCH;
+                if ((int)(at_slot[i].watch_until - cache_frame) >= 0 && at_slot[i].watch_until && at_logged < cap)
+                    anim_trace_pose(h, anim, t);
+            }
+            if (p4_anim_trace_h && (unsigned)h == p4_anim_trace_h && at_logged < cap)
+                anim_trace_pose(h, anim, t);
+            at_slot[i].anim = anim, at_slot[i].t = t, at_slot[i].frame = cache_frame;
+            return;
+        }
+        if (!at_slot[i].h && free_i < 0)
+            free_i = i;
+    }
+    if (free_i >= 0)
+        at_slot[free_i].h = h, at_slot[free_i].anim = anim, at_slot[free_i].t = t, at_slot[free_i].frame = cache_frame,
+        at_slot[free_i].watch_until = at_slot[free_i].wrap_frame = 0;
+}
 static int draw_skinned_ge(const Geometry *g, const Skin *skin, const Hierarchy *hierarchy, const Matrix *model, int lit, int modulate, int env_ge)
 {
+    if (p4_anim_trace)
+        anim_trace(hierarchy);
     prof_begin(PROF_SBONES);
     bone_check_geometry = g;
     unsigned sb_t0 = sceKernelGetSystemTimeLow();
@@ -2036,6 +2421,11 @@ static int draw_skinned_ge(const Geometry *g, const Skin *skin, const Hierarchy 
                 skin_simplify_now = p4_skin_lod_keep;
             skin_lod_draws += level == 1, skin_full_draws += level == 0, skin_far_draws += level == 2;
         }
+    }
+    if (rtt_target && p4_shadow_lod > 0) { /* b403: the field shadow's 128x128 silhouette from simplified geometry */
+        skin_simplify_now = p4_shadow_keep > 0 && p4_shadow_keep < 100 ? p4_shadow_keep : 0;
+        skin_bones_now = p4_shadow_lod >= 2 ? p4_skin_far_bones : 0;
+        shadow_lod_draws++;
     }
     SkinGeometry *e = nbones > 0 ? skin_geometry(g, skin, nbones, lit, lit || env_ge) : 0;
     if (e && e->bone_map && !far_bones_sane(e, hierarchy, nbones)) {
@@ -2191,6 +2581,10 @@ static int draw_skinned_ge(const Geometry *g, const Skin *skin, const Hierarchy 
         int cpu = 0;
         for (int k = 0; k < batch->bones && any_out; k++)
             cpu |= bone_out[batch->palette[k]];
+        if (cpu && !batch->v) { /* b398: the original was freed (p4_skin_drop_original): no CPU path for this batch */
+            skin_cpu_dropped++;
+            continue;
+        }
         prof_begin(PROF_SMAT);
         for (int k = 0; k < batch->bones && !cpu; k++) {
             const Matrix *bm = &bones[batch->palette[k]];
@@ -2254,8 +2648,8 @@ static int draw_skinned_ge(const Geometry *g, const Skin *skin, const Hierarchy 
         prof_begin(PROF_SBIND);
         unsigned key[2];
         if (ge_work_on && !cpu)
-            work_batches++, work_wreal += batch->wreal, work_wslotv += batch->bones * batch->vertices, work_rigid += batch->rigid, work_tris += batch->indices / 3;
-        const unsigned char *env_entry = env_ge && !cpu ? matfx_env_entry(material) : 0;
+            work_batches++, work_wreal += batch->wreal, work_wslotv += batch->grp ? batch->wslotv : batch->bones * batch->vertices, work_rigid += batch->rigid, work_tris += batch->indices / 3;
+        const unsigned char *env_entry = env_ge && !cpu && batch->v ? matfx_env_entry(material) : 0; /* b398: no original, no env pass */
         GeCall *slot = 0, *call = !cpu && !env_entry && !sk_recording && skin_call_key(batch, material, modulate, &light, key) ? call_find(batch->call, key, &slot) : 0;
         if (call && call_replay(call, 0)) {
             prof_end(PROF_SBIND);
@@ -2267,6 +2661,7 @@ static int draw_skinned_ge(const Geometry *g, const Skin *skin, const Hierarchy 
         else if (slot)
             call_misses[0]++;
         const unsigned *from = gu_list->current;
+        flat_hold = slot != 0; /* b419 */
         void **texture = material->texture;
         bind_mask(material->colour >> 24);
         bind_raster(texture ? *texture : 0, GU_REPEAT);
@@ -2277,6 +2672,15 @@ static int draw_skinned_ge(const Geometry *g, const Skin *skin, const Hierarchy 
         prof_begin(PROF_STEST);
         if (cpu)
             skin_batch_cpu(batch, e->lit, e->nrm, e->packed ? e->pack : 0, material, modulate, &light, space, near);
+        else if (batch->grp) { /* b390: one PRIM a weight group, the same bone matrices */
+            int nocol = batch->grp[0].nocol;
+            if (nocol) /* b391/b395: the batch's one dropped vertex colour as the ambient material (AMC, AMA) */
+                ge_word(0x55, batch->grp[0].colour), ge_word(0x58, batch->grp[0].colour >> 24);
+            for (int i = 0; i < batch->ngroups; i++)
+                draw_tested(batch->grp[i].prim, batch->grp[i].vtype, batch->grp[i].count, batch->grp[i].idx, batch->grp[i].v);
+            if (nocol)
+                ge_word(0x55, 0xffffff); /* as bind_ge_light_body leaves it */
+        }
         else if (batch->strip) {
             draw_strip_lens = batch->strip_lens, draw_strip_n = batch->strip_n; /* b250: one PRIM a strip (gu_draw) */
             draw_tested(GU_TRIANGLE_STRIP, batch->vtype, batch->strip_count, batch->strip, batch->v);
@@ -2292,6 +2696,7 @@ static int draw_skinned_ge(const Geometry *g, const Skin *skin, const Hierarchy 
             *gu_list->current++ = 0xff000000u, skin_dummies++;
         if (slot)
             call_record(slot, key, from, 0);
+        flat_hold = 0;
         prof_end(PROF_STEST);
         draw_skin_alpha = 0;
     }

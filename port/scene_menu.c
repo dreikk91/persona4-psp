@@ -4,6 +4,7 @@
    - PSPLink: tools/psp_scene.py writes p4_scene_req (arguments first, the kind word last).
    - On the PSP: hold L + R + START. The game pauses under a menu (numbers, presets from scenes.txt next to the
      EBOOT, "save this place"); the frame on screen stays, the menu is drawn into it with the CPU.
+   The menu's first row (and K_SAVE) is a quick save instead: the game's save screen in any field (save_begin).
 
    Every request repeats one of the game's own script commands (src/Kosaka/k_command_inferred_00175f70.c in the decomp):
      field  K_Cmd_CALL_FIELD      (0x176450): sequence 9, a 0x1C record {field, room, entry, 0, direction}
@@ -61,6 +62,18 @@ void datSetPendingDateIndex(short date);
 void datSetPendingTimeSlot(unsigned char slot);
 void datSetPendingFlag(unsigned flags);
 int fadeBeginTransition(int mode, int duration);
+/* quick save: the save points' own screen (K_Cmd_ICON_START_FLAGGED_WAIT) under the field's own input hold */
+int mcIconTaskCreate(void *parent, int mode);
+int mcIconTaskPoll(void);
+void FldSlotBroadcastState(int state);
+void FldFrameObjSetActive(void *task, int active);
+void FldFrame_SetStateFlags(void *task, int value);
+void FldFrame_ClearStateFlags(void *task, int value);
+short mdlGetLayerAnimation(int model, int layer);
+int mdlDispatchAnimIfPresent(void *model, unsigned layer, short animation, unsigned short frame, int flags);
+int FldMoveAnimPrimary(int character);
+int FldMoveAnimSecondary(int character);
+int FldCharacterAnimSelect(int character);
 
 enum { SEQ_NONE = -1, SEQ_BATTLE = 6, SEQ_FIELD = 9, SEQ_EVENT = 0xA, SEQ_FLOOR = 0xB, SEQ_DAY = 0x1A };
 enum { TASK_WORK = 0x38, TASK_NEXT = 0x3C };
@@ -73,10 +86,16 @@ enum { TASK_WORK = 0x38, TASK_NEXT = 0x3C };
 #define SCENE_STATE G32(0x9db0 - 0x10000)   /* FieldSceneState: field, room, resources, flags */
 #define FIELD_ROOT R32(0x007D2510)          /* field root task (k_field.c FldRootCreate) */
 #define STEP_TASK R32(0x00764334)           /* dungeon step task (K_SeqFldStepStart): work +4 step, +8 entry */
+/* the rest of the field frame (FldFrame at 0x7D2510, MT_Scene_GetFrameState) */
+#define FIELD_CAMERA R32(0x007D2514)        /* +0x04 camera task: state flag 2 holds it while a trigger runs */
+#define FIELD_TRIGGER R32(0x007D2518)       /* +0x08 FldEvent_SpawnTrigger: work +0 mode (0 walk and scan, 1 a
+                                               trigger runs, 2 nothing: no walking, talking or Camp) */
+#define FIELD_SUPPORTER R32(0x007D252C)     /* +0x1C navigator chatter task (FldFrameObjSetActive 1 = held) */
+#define PLAYER_MODEL R32(0x007EFA00)        /* the player's model (FldEvent_TriggerUpdate) */
 static const int task_lists[3] = { 0xb9ec - 0x10000, 0xb9f8 - 0x10000, 0xba04 - 0x10000 };
 
-enum { K_NONE, K_FIELD, K_FLOOR, K_EVENT, K_BATTLE, K_MENU, K_DAY };
-static const char *const kind_names[] = { "none", "field", "floor", "event", "battle", "menu", "day" };
+enum { K_NONE, K_FIELD, K_FLOOR, K_EVENT, K_BATTLE, K_MENU, K_DAY, K_SAVE };
+static const char *const kind_names[] = { "none", "field", "floor", "event", "battle", "menu", "day", "save" };
 static const char *const slot_names[6] = { "AM_A", "AM_B", "PM_A", "PM_B", "PM_C", "PM_D" };
 
 /* from April: the game's date index 0 is April 1 (calSplitDayOfYear, month lengths at 0x5E45E0) */
@@ -201,10 +220,60 @@ static const char *not_ready(const Where *w)
 
 /* ---- requests */
 
-enum { R_IDLE, R_WAIT, R_LOADING, R_AWAY, R_RETURN };
+enum { R_IDLE, R_WAIT, R_LOADING, R_AWAY, R_RETURN, R_SAVING };
 static struct {
     int kind, state, a, b, c, d, timer, seen, via, back_field, back_room;
+    unsigned trigger; /* K_SAVE: the trigger task held in mode 2 */
 } rq;
+
+/* ---- quick save: the save points' screen (script command K_Cmd_ICON_START_FLAGGED_WAIT: mcIconTaskCreate(0, 1),
+   mode 1 lets every slot take a save) opened in any field. A save point runs it from a script, and the field holds
+   itself while a trigger's script runs (FldEvent_RunTriggerHold): the trigger controller leaves mode 0, the camera
+   gets state flag 2, the navigator and the field's chasers/patrols pause. The same hold here, with the trigger
+   controller in mode 2, which runs nothing: the X and /\ the save screen takes do not talk to anyone or open Camp.
+   The save is the game's own image (datSaveBuildImage): date, party, items, flags and the field and room; a load
+   starts that room from its entry. */
+static unsigned trigger_work(void) { return word_at(FIELD_TRIGGER, TASK_WORK); }
+
+static int save_begin(void)
+{
+    unsigned work = trigger_work();
+    if (!work || *(volatile int *)work != 0)
+        return 0;
+    *(volatile int *)work = 2;
+    rq.trigger = FIELD_TRIGGER;
+    /* stop a walking animation, as the trigger controller does when it leaves mode 0 */
+    unsigned model = PLAYER_MODEL;
+    if (model) {
+        int animation = mdlGetLayerAnimation((int)model, 0);
+        if (animation == (short)FldMoveAnimPrimary(1) || animation == (short)FldMoveAnimSecondary(1))
+            mdlDispatchAnimIfPresent((void *)model, 0, (short)FldCharacterAnimSelect(1), 4, 1);
+    }
+    if (FIELD_CAMERA)
+        FldFrame_SetStateFlags((void *)FIELD_CAMERA, 2);
+    if (FIELD_SUPPORTER)
+        FldFrameObjSetActive((void *)FIELD_SUPPORTER, 1);
+    FldSlotBroadcastState(1);
+    mcIconTaskCreate(NULL, 1);
+    return 1;
+}
+
+static void save_end(void)
+{
+    /* only the field we held: a scene change in between has torn it down with its tasks */
+    if (rq.trigger && FIELD_TRIGGER == rq.trigger) {
+        unsigned work = trigger_work();
+        if (work && *(volatile int *)work == 2)
+            *(volatile int *)work = 0;
+        if (FIELD_CAMERA)
+            FldFrame_ClearStateFlags((void *)FIELD_CAMERA, 2);
+        if (FIELD_SUPPORTER)
+            FldFrameObjSetActive((void *)FIELD_SUPPORTER, 0);
+        FldSlotBroadcastState(0);
+    }
+    rq.trigger = 0;
+}
+
 static char last_result[96] = "";
 static void history_add(const char *result);
 
@@ -312,6 +381,28 @@ static void run_request(void)
     switch (rq.state) {
     case R_WAIT: {
         const char *why = not_ready(&w);
+        if (rq.kind == K_SAVE) {
+            /* a floor's place is not in the save (a load starts the floor's field): fields only for now */
+            if (!why && w.sequence == SEQ_FLOOR)
+                why = "a dungeon floor: quick save works in fields";
+            if (!why && !save_begin())
+                why = "the field's trigger is busy";
+            if (!why) {
+                rq.back_field = w.field, rq.back_room = w.room;
+                rq.state = R_SAVING;
+                rq.timer = 0;
+                snprintf(last_result, sizeof last_result, "save: the save screen is open");
+                p4_log("SCENE save screen opened in sequence %d field %d room %d\n", w.sequence, w.field, w.room);
+                return;
+            }
+            /* asked for now: a short wait (2 s) for a passing state, not the 60 s of a scene request */
+            if (rq.timer < 120)
+                return;
+            char text[96];
+            snprintf(text, sizeof text, "refused: %s", why);
+            finish(1, text);
+            return;
+        }
         if (!why && rq.kind == K_DAY && w.sequence == SEQ_FLOOR && !rq.via && mtSceneResListPrepareAll()) {
             /* A day from a dungeon floor: out through a town field first (Dojima's house, 7/2, where most day
                scripts end), the way the game's own scripts leave a floor, then the day from there. b292 started the
@@ -430,6 +521,15 @@ static void run_request(void)
             revive_party();
         rq.state = R_RETURN;
         rq.timer = 0;
+        return;
+    }
+    case R_SAVING: {
+        /* 1: the screen closed after a save or load went through (D_00764634), 2: closed without one */
+        int result = mcIconTaskPoll();
+        if (!result)
+            return;
+        save_end();
+        finish(0, result == 1 ? "saved: the save screen closed after a save" : "closed without saving");
         return;
     }
     case R_RETURN:
@@ -798,6 +898,7 @@ static void build_page(int page)
     char label[64];
     row_count = 0;
     if (page == PAGE_MAIN) {
+        add_request(K_SAVE, 0, 0, 0, "Quick save: the game's save screen, here");
         add_row(A_CALENDAR, "Calendar: choose a day, see and start its events  >");
         add_row(A_MANUAL, "Manual: field / floor / event / battle / day by number  >");
         add_row(A_SAVE, "Save this place as a preset");
@@ -1050,7 +1151,7 @@ unsigned p4_scene_frame(unsigned buttons)
         p4_scene_req[0] = 0;
         if (kind == K_MENU)
             buttons |= combo, last = 0;
-        else if (kind > K_NONE && kind <= K_DAY)
+        else if (kind > K_NONE && kind <= K_SAVE)
             submit(kind, a, b, c, d);
     }
     observe();

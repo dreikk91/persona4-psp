@@ -53,7 +53,7 @@ static void ib_run_end(void)
     }
     ib_run_g = 0, ib_run_n = 0;
 }
-static void ib_flush(void)
+P4_HOT static void ib_flush(void)
 {
     if (!ib.count || ib_flushing)
         return;
@@ -117,7 +117,7 @@ static int ib_same(const Geometry *g, int modulate, const V3 *normals)
     return 1;
 }
 /* 1: atomic g at model is in the batch (drawn later); 0: draw it as usual */
-static int ib_take(const Geometry *g, const Matrix *model, const V3 *normals, int skinned)
+P4_HOT static int ib_take(const Geometry *g, const Matrix *model, const V3 *normals, int skinned)
 {
     /* b382: an atomic that culls its back faces (p4_cull_back, bind_depth) is drawn on its own, with its own state */
     if (p4_cull_back && render_state[RS_CULLMODE] == 2 && (p4_cull_back < 3 || (g->flags & 0x2c) == 0x20))
@@ -490,7 +490,7 @@ static FarProxy *fp_find(const Geometry *g, const Matrix *model, const V3 *norma
     return spare->state > 0 ? spare : 0;
 }
 /* 1: drawn as its stand-in */
-static int fp_try(const void *atomic, const Geometry *g, const Matrix *model, const V3 *normals, int skinned)
+P4_HOT static int fp_try(const void *atomic, const Geometry *g, const Matrix *model, const V3 *normals, int skinned)
 {
     if (p4_far_proxy <= 0 || skinned || shadow_shear_m || rtt_target || g->numVertices < p4_far_proxy_min_vertices || g->mesh->numMeshes < 2)
         return 0;

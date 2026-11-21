@@ -1,7 +1,7 @@
 # Animation on the PSP: where the time goes, and a lighter system
 
 Started 2026-11-14 (b263). The user's direction: make the animation system light and fitted to the PSP, as native
-PSP games do (Crisis Core moves many enemies without slowing down), keeping what the game does with it.
+PSP games do, keeping what the game does with it.
 
 ## What runs now, per model and tick
 

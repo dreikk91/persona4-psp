@@ -112,8 +112,9 @@ int p4_cloud_draw(const Vertex2D *mask, const Vertex2D *noise, Raster *raster, u
     if (!texture) { cloud_fallbacks++; return 0; }
     if (!list_room()) return 1;
     prof_begin(PROF_2D);
+    translucent_flush(); /* b1394: outside the timed piece */
     int timed = ge_time_begin();
-    translucent_flush(); gu_dirty(); begin_frame(); bind_depth();
+    gu_dirty(); begin_frame(); bind_depth();
     /* shortcut: only DistortParticle mode 0 scratch alpha; audit later alpha readers before extending the hook. */
     sceGuPixelMask(0xff000000);
     sceGuDisable(GU_STENCIL_TEST); sceGuDisable(GU_ALPHA_TEST); sceGuDisable(GU_CLIP_PLANES);

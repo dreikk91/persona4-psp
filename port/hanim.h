@@ -394,7 +394,9 @@ void func_00415bc0(void *out, void *in1, void *in2, float time, void *data)
    skin_bones rebuilds its matrices when it is drawn again. p4_anim_far: one last drawn farther than p4_anim_far_depth
    is updated every p4_anim_far_step ticks and drawn with the older matrices in between. Hierarchies never drawn as
    skins (rigid parts on bone frames) always update. The counters run with both off: what each would save. */
-int p4_anim_cull = 0, p4_anim_far = 1, p4_anim_far_step = 2; /* b173: far on (b172 class, by eye: fine) */
+/* 2026-11-18: p4_anim_far off by the user's choice: in the Margaret dialogue every character (Margaret too) is past 500, and
+   an update every 2nd tick on top of frameskip's every 2nd drawn tick made her visibly less smooth (b366 A/B: ~0.3 ms CPU). */
+int p4_anim_cull = 0, p4_anim_far = 0, p4_anim_far_step = 2; /* b173: far on (b172 class, by eye: fine) */
 float p4_anim_far_depth = 500.0f;
 enum { ANIM_STATES = 128 };
 typedef struct { const void *h, *matrices, *interp; int nodes; unsigned drawn, updated, advanced, moved, used[8]; float depth, pending, at[3]; unsigned char stale, skinned, lod; } AnimState;
@@ -597,7 +599,11 @@ static AnimState *anim_by_interp(const void *interp)
    RtAnim calls SubAnimTime, SetCurrentAnim, Blend, Destroy. A retail AddAnimTime catches the walk up by itself.
    0 off, 1 undrawn ticks, 2 every tick (PPSSPP test: same picture). p4_anim_lazy_check: a copy of each deferred
    interpolator runs the retail calls and is compared when materialised. */
-int p4_anim_lazy = 1, p4_anim_lazy_check = 0;
+/* b410: off. PPSSPP at PSP speed (p4_slow_us 35000), Margaret route, ANIMTRACE: with lazy on, one-shot clips wrapped back to
+   their start for a few frames before the game switched them (16 times; Margaret lifts the book, finishes and bends
+   again, as seen on the PSP); lazy off (native on or off): 0. Its poses were exact (lazy_check 0 diffs): what it defers
+   in an undrawn tick (the key walk) delays the game noticing the clip end. b366 PSP: lazy saved ~1 ms CPU. */
+int p4_anim_lazy = 0, p4_anim_lazy_check = 0;
 int p4_anim_native = 1; /* b204: plain AddAnimTime steps in C (func_003d5bc0) */
 static unsigned native_adds, retail_adds;
 enum { LAZY_SLOTS = 128 }; /* b203: material UV interpolators too */
@@ -945,7 +951,11 @@ int func_003d5bc0(void *interpolator, float time)
             return 1;
         lazy_refused++;
     }
-    if ((p4_anim_far_kadd && (p4_anim_far || p4_anim_cull)) || (p4_anim_skip_kadd && skip_frame && p4_frameskip_bones && !owned)) {
+    /* b412: the drawn tick enters too, so it adds what the undrawn ticks kept. With p4_anim_far off (b411 default) it
+       did not: the kept time stayed back until a second had piled up or a clip neared its end. PSP b411 Heaven
+       ANIMTRACE: every clip moved 33 ms a drawn frame at ~1.55 ticks a frame (65% speed), idle loops restarted by the
+       game at ~63% of their length, Margaret's book lift slow and then 1066 ms ahead in one frame. */
+    if ((p4_anim_far_kadd && (p4_anim_far || p4_anim_cull)) || (p4_anim_skip_kadd && p4_frameskip_bones && !owned)) {
         AnimState *s = anim_by_interp(interpolator);
         if (s && s->skinned) {
             kadd_mapped++;

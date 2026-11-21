@@ -32,7 +32,7 @@ typedef float f32;typedef double f64;
         code += function(source, 'sdkSpriteTableRecord(')
         code += function(source, 'sdkSpriteIndexedRecord(')
         code += r'''
-u32 ourGlobals[4096];int p4_ui_font,p4_ui_sprite;
+u32 ourGlobals[4096];int p4_ui_font,p4_ui_sprite,p4_ui_native;
 f32 D_008872F8[1]={65535},fGpffff8084=3.14159265f;
 f32 fGpffff8054=1.f/120,fGpffff8058=-1.f/5040,fGpffff805c=1.f/362880,fGpffff8060=0;
 f32 fGpffff81b0=0,fGpffff81b4=0,fGpffff81b8=0,fGpffff81bc=0;
@@ -42,6 +42,9 @@ static RwCamera camera;
 static RwMatrix rotation;
 static unsigned state_hash,draws;
 static unsigned device_values[32],sky_values[4];
+#define render_state device_values
+#define sky_state sky_values
+static int sl_state_dirty;
 static P4UiVertex captured[24];
 s32 kwlnGetCamera(void) {return (s32)&camera;}
 RwMatrix *func_003e0f80(void) {return &rotation;}
@@ -72,6 +75,9 @@ static s32 submit(int prim,void *vertices,int count) {
     return p4_ui_quad_draw(compact);
 }
 '''
+        renderer = (c.ROOT / 'port/rwsky.c').read_text()
+        for name in ('ui_set_state(', 'p4_ui_raster(', 'p4_ui_sprite_state('):
+            code += function(renderer, name)
         code += function(source, 'sdkSpriteDraw(').replace('sdkSpriteDraw(', 'old_sprite(', 1)
         code += function(native, 'p4_calendar_sprite_state(')
         code += function(native, 'p4_native_sdkSpriteDraw(')
@@ -84,6 +90,7 @@ int main(void) {
     globals->device.setState=state;globals->device.renderPrimitive=submit;
     camera.nearPlane=0.125f;raster.width=256;raster.height=128;
     pack.recordsAddress=(u32)records;pack.rasters[0]=(u32)&raster;sample.packAddress=(u32)&pack;
+    for(p4_ui_native=0;p4_ui_native<2;p4_ui_native++)
     for(int index=0;index<2;index++) for(int flags=0;flags<16;flags++) for(int borders=0;borders<16;borders++)
     for(int transform=0;transform<4;transform++) for(int extend=0;extend<3;extend++) {
         SdkSpriteRecord *r=&records[index];sample.recordIndex=index;
@@ -102,14 +109,20 @@ int main(void) {
         memcpy(expected_device,device_values,sizeof expected_device);memcpy(expected_sky,sky_values,sizeof expected_sky);
         draws=state_hash=0;memset(captured,0,sizeof captured);memset(device_values,0,sizeof device_values);memset(sky_values,0,sizeof sky_values);
         p4_native_sdkSpriteDraw((u8 *)&sample,index);
-        assert(expected_draws==draws && expected_state==state_hash && !memcmp(reference,captured,sizeof captured));cases++;
+        assert(expected_draws==draws && !memcmp(reference,captured,sizeof captured));
+        assert(!memcmp(expected_device,device_values,sizeof expected_device) && !memcmp(expected_sky,sky_values,sizeof expected_sky));
+        if(!p4_ui_native) assert(expected_state==state_hash);
+        else assert(!state_hash); /* Native sprites do not enter either RW state callback. */
+        cases++;
         if(index) {
             draws=0;memset(device_values,0,sizeof device_values);memset(sky_values,0,sizeof sky_values);
             p4_calendar_sprite_state(&pack,index);
             assert(!draws && !memcmp(expected_device,device_values,sizeof expected_device) && !memcmp(expected_sky,sky_values,sizeof expected_sky));
         }
     }
-    printf("%u sprites: UV flips, rotation, scale, tint/fade, borders, extensions and device states match\n",cases);
+    sl_state_dirty=0;p4_ui_sprite_state((void *)device_values[1],records[1].renderFlags,1);assert(!sl_state_dirty);
+    p4_ui_raster(&pack);assert(sl_state_dirty && device_values[1]==(unsigned)&pack);
+    printf("%u sprites: native/compatibility geometry and readable states match\n",cases);
 }
 '''
         self.check_32(code)

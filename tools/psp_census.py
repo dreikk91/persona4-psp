@@ -39,6 +39,21 @@ DROP_LOCAL = {
     "src/rw/skyblit.c": ["func_003ec330"],
 }
 FIXES = {
+    # Velvet Room after a fusion (from persona4-portable 29b0fcf): the return reloads field 8/3 room 1 but, unlike
+    # the normal entry (y_fclCombine.c, US 0x310f20), never restarts anim 13, so Margaret stood instead of sitting.
+    "src/unplaced/unplaced_inferred_0033d310.c": [
+        ('#include "fcl_combine_internal.h"',
+         '#include "fcl_combine_internal.h"\n#include "scene_resource_internal.h"\n'
+         '#include "model_motion_internal.h"\nextern u8 *MT_Scene_GetResListHead(s32);'),
+        ("         view = kwlnGetCamera();",
+         "         ResrcHeader *actor;\n"
+         "         for (actor = (ResrcHeader *)MT_Scene_GetResListHead(3);\n"
+         "              actor; actor = (ResrcHeader *)actor->next) {\n"
+         "             if ((actor->resTypeId & 0x3ff) == 0x38)\n"
+         "                 mdlDispatchAnimIfPresent(((SceneCharacterUpdate *)actor)->model, 0, 13, 0, 1);\n"
+         "         }\n"
+         "         view = kwlnGetCamera();"),
+    ],
     # Retail reads this word with lwr/lwl (0x0019cf54): offset 0x4e is not 4-aligned. A plain lw raised an address
     # error on the PSP when the first battle's units refreshed their placement.
     "src/Battle/btlUnit_inferred_0019c0d0.c": [
@@ -732,6 +747,9 @@ def native_ui(text, rel):
     }
 ''' + clone[b:]
         clone = clone.replace('D_00887310[0](4, vertices, 4);', 'p4_ui_quad_draw(vertices);')
+        bind = 'D_00887300[0](1, ((FrFontRasterEntry *)raster)->texture);'
+        assert bind in clone
+        clone = clone.replace(bind, 'if (p4_ui_native) p4_ui_raster((void *)((FrFontRasterEntry *)raster)->texture);\n    else ' + bind)
         dispatch = ('\n    if (p4_ui_font) return p4_native_frFontRasterDrawGlyph('
                     'x, y, depth, glyph, palette, width, height, rgba);\n')
     else:
@@ -748,6 +766,19 @@ def native_ui(text, rel):
     temporary.packAddress = (u32)pack;
     temporary.recordIndex = record;
 ''' + initial + '    rasterIndex = ((SdkSpriteRecord *)sdkSpriteIndexedRecord(sample))->rasterIndex;\n' + sky + bind + '}\n\n'
+        direct = '''    p4_ui_sprite_state(
+        (((SdkSpriteRecord *)sdkSpriteTableRecord(sample))->flags & 8) ? 0 : SDK_SPRITE_RASTERS(sample)[rasterIndex],
+        ((SdkSpriteRecord *)sdkSpriteTableRecord(sample))->renderFlags, setStates);
+'''
+        # State-only calendar calls must leave exactly the same readable state as drawn sprites.
+        state_only = state_only.replace(initial, '').replace(sky, '')
+        state_only = state_only.replace(bind, '    if (p4_ui_native) {\n' + direct + '        return;\n    }\n' + initial + sky + bind)
+        clone = clone.replace(initial, initial.replace('if (setStates != 0)', 'if (!p4_ui_native && setStates != 0)'))
+        clone = clone.replace(sky, sky.replace('if (setStates != 0)', 'if (!p4_ui_native && setStates != 0)'))
+        clone = clone.replace(bind, '    if (p4_ui_native) {\n' + direct + '    } else {\n' + bind + '    }\n')
+        for raster in ('SDK_SPRITE_RASTERS(sample)[rasterIndex]', 'NULL'):
+            call = f'states[0](1, {raster});'
+            clone = clone.replace(call, f'if (p4_ui_native) p4_ui_raster({raster}); else {call}')
         clone = clone.replace('SdkSpriteVertex vertices[4];', 'P4UiVertex vertices[4];')
         clone = clone.replace('SdkSpriteVertex *vertex =', 'P4UiVertex *vertex =')
         clone = clone.replace('    reciprocalZ = 1.0f / ((RwCamera *)(u32)kwlnGetCamera())->nearPlane;\n', '')

@@ -16,12 +16,21 @@ Excluded from that grant are the original game, its code and assets, decompiled 
 
 Retain upstream authorship and any file-level notices. Obtain applicable permission before redistributing upstream material or derivatives where required. Persona 4 game code and assets, Sony code and third-party middleware retain their respective rights.
 
+## Adapted fork contributions
+
+[MeMeNT0xMoRii/persona4-portable](https://github.com/MeMeNT0xMoRii/persona4-portable) is an MIT-licensed fork of this port. Adaptations include launch-folder and PSP Go storage paths, save/data validation, HOME handling, UI/fog/TMX and particle fixes, fusion/Social Stats fixes, and texture swizzling/allocation fixes. Source comments and the development history identify the adaptations. Preserve the fork's MIT notice:
+
+> Copyright (c) 2026 Persona 4 for PSP contributors
+
+See the fork's [LICENSE](https://github.com/MeMeNT0xMoRii/persona4-portable/blob/main/LICENSE) and this repository's MIT license text. This credit covers adapted port contributions, not the underlying game or upstream decompilation.
+
 ## Other tools and references
 
 | Component | Use | Upstream |
 | --- | --- | --- |
 | PSPDEV / PSPSDK | PSP compiler, libraries and packaging tools | [PSPDEV](https://github.com/pspdev), [PSPSDK](https://github.com/pspdev/pspsdk) |
 | FFmpeg | Offline audio/video conversion | [FFmpeg](https://ffmpeg.org/) |
+| Pillow | Offline texture palette generation | [Pillow](https://github.com/python-pillow/Pillow) |
 | PyAV | Video metadata and AVC packaging | [PyAV](https://github.com/PyAV-Org/PyAV) |
 | imageio-ffmpeg | Optional FFmpeg executable provider | [imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg) |
 | vgmstream | Original audio decoding, including AHX | [vgmstream](https://github.com/vgmstream/vgmstream), tested release [r2168](https://github.com/vgmstream/vgmstream/releases/tag/r2168) |

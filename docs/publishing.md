@@ -1,6 +1,6 @@
 # Publishing the project
 
-The source repository is [dreikk91/persona4-psp](https://github.com/dreikk91/persona4-psp). Original port source, build tools and documentation are published from a separate source snapshot with fresh Git history. Local game artifacts and external checkouts are excluded from that snapshot. The older Windows preparation release asset was withdrawn; the current source-build utility is published as the b249 pre-release.
+The source repository is [dreikk91/persona4-psp](https://github.com/dreikk91/persona4-psp). Original port source, build tools and documentation are published from a separate source snapshot with fresh Git history. Local game artifacts and external checkouts are excluded from that snapshot. The older Windows preparation release asset was withdrawn; the current source-build utility is published as the b450 pre-release.
 
 For updates, clone the existing public repository with `gh repo clone dreikk91/persona4-psp`, copy only the reviewed source/documentation changes into that clone, and commit and push from there. Preserve the public history; do not push the development checkout's history. Uploading a Windows utility to Releases is a separate operation from pushing source changes.
 
@@ -28,7 +28,7 @@ Review filenames and file contents, including historical versions, for game data
 
 ## Release artifacts
 
-Do not upload `build/release_b249/UPDATE`, the complete installation folder or any converted media. They are local installation products.
+Do not upload `build/release_b450/UPDATE`, the complete installation folder or any converted media. They are local installation products.
 
 The withdrawn b164 package contained an EBOOT with game-derived code. The packager now defaults to a source-build package that compiles EBOOT and matching data locally; it does not include a prebuilt game executable, game objects or a numerical data recipe. The utility downloads the compiler from the separate [toolchain release](https://github.com/dreikk91/persona4-psp/releases/tag/toolchain-gcc15.2), whose archive also carries the corresponding source of GCC, binutils, newlib, PSPSDK and the statically linked GMP/MPFR/MPC. The pinned upstream source is obtained separately. Legacy EBOOT packaging requires `--legacy-prebuilt` explicitly.
 
@@ -37,3 +37,5 @@ Local compilation does not establish permissions for the sources or tools. The M
 The tested Windows compiler is published as the [toolchain release](https://github.com/dreikk91/persona4-psp/releases/tag/toolchain-gcc15.2); its fingerprint is `recommended_toolchain.sha256` in `tools/build_reference.json`. Bit-for-bit release reproducibility on other machines is not established here. Do not advertise a fully self-contained or one-click source build until a clean public setup has been verified.
 
 Documentation must use repository-relative examples or named environment variables, never absolute host paths or personal home directories. Run `python -m unittest discover -s tools -p test_public_docs.py` before publishing; device paths such as `ms0:/` and `host0:/` are valid PSP paths.
+
+The b450 snapshot excludes other-game decompilation sources and dedicated research notes; keep external checkouts and generated game data outside public source and utility packages.

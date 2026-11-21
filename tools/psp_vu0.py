@@ -23,6 +23,13 @@ class Unknown(Exception):
     pass
 
 
+def encoded_vsqrt(word):
+    """COP2 VSQRT written as .word (MWCC has no mnemonic): ft and ftf pick the source lane."""
+    if word & ~((31 << 16) | (3 << 23)) == 0x4A0003BD:
+        return f"vsqrt $Q, $vf{(word >> 16) & 31}{LANE[(word >> 23) & 3]}"
+    raise Unknown(f".word {word:#x}")
+
+
 def mask(field):
     return sum(1 << LANE.index(c) for c in field)
 
@@ -122,6 +129,8 @@ class Block:
         parts = line.split(None, 1)
         op = parts[0]
         args = [a.strip() for a in parts[1].split(",")] if len(parts) > 1 else []
+        if op == ".word" and len(args) == 1:
+            return self.line(encoded_vsqrt(int(args[0], 0)))
         if op in ("nop", "vnop", "vwaitq"):
             return ""
         m = ARITH.match(op)
@@ -229,7 +238,7 @@ def translate(inner, parameters=()):
         block = Block(ops)
         body, decls, after = [], [], []
         lines = [raw.strip() for raw in re.split(r"[\n;]", template)]
-        lines = [line for line in lines if line and not line.startswith(".")]
+        lines = [line for line in lines if line and (not line.startswith(".") or line.split()[0] == ".word")]
         # ParticleProjectVertices reloads the same basis for each particle. Preserve its shared VU0
         # register state, but execute this exact matrix block on the PSP's native VFPU.
         particle_matrix = [
