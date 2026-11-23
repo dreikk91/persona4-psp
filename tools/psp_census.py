@@ -301,6 +301,22 @@ FIXES["src/Graphics/Model/mdlManager.c"] += [
     # b283: one statement, it is the body of `if ((flags & 4) == 0)`. b279-b282 had three: the advance ran for every
     # model, flag 4 too (models the game advances elsewhere), and their animation ran twice as fast.
 ]
+# b476: sections 20 (the model matrix multiply) and 21 (the tick branch: effect scales and transforms, attachments)
+FIXES["src/Graphics/Model/mdlManager.c"] += [
+    ('        RwMatrixMultiply(&matrix, &((Model*)model)->identityMat, model);\n',
+     '        { extern void p4_sec(int, int); p4_sec(20, 1); RwMatrixMultiply(&matrix, &((Model*)model)->identityMat, model); p4_sec(20, 0); }\n'),
+    ('        if (tick != 0) {\n            draw = ((Model *)model)->effects;\n',
+     '        { extern void p4_sec(int, int); p4_sec(21, 1); }\n        if (tick != 0) {\n            draw = ((Model *)model)->effects;\n'),
+    ('        { extern void p4_sec(int, int); p4_sec(5, 1); }\n        mdlTickMotionState(model + 0x2D0);\n',
+     '        { extern void p4_sec(int, int); p4_sec(21, 0); }\n        { extern void p4_sec(int, int); p4_sec(5, 1); }\n        mdlTickMotionState(model + 0x2D0);\n'),
+]
+# b478: the emitter kind updates (mdlEffectAdvanceEmitter's table D_00713D50) in the OT/callback table (hwot), keyed
+# by function | 2 (Heaven: ParticleReleaseEmitterAndUpdate ~0.67 M cycles a drawn frame, nearly all here)
+FIXES["src/Graphics/Model/mdlEffect.c"] = FIXES.get("src/Graphics/Model/mdlEffect.c", []) + [
+    ('    D_00713D50[*(u16 *)emitter * 4](emitter);\n',
+     '    { extern unsigned p4_ot_begin(void); extern void p4_ot_end(unsigned, unsigned); void (*p4fn)(u8 *) = D_00713D50[*(u16 *)emitter * 4];\n'
+     '      unsigned p4t = p4_ot_begin(); p4fn(emitter); p4_ot_end(p4t, (unsigned)p4fn | 2); }\n'),
+]
 # b278 p4_tick_lite (port/rwsky.c): in a tick frameskip leaves undrawn, mdlAdvanceModel skips what the next drawn tick
 # sets again from scratch: bit 1 the root frame and attached model matrices, 2 the effect transforms, 4 the child models'
 # indexed matrix copies. Clocks, layers, motion and attachment delays still run every tick.

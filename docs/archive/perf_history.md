@@ -112,7 +112,7 @@ the near-camera guarded path, animation (`linkOt`).
 
 ## b258: static atomics as one CALL to a prepared list (`p4_static_list`, 2026-11-14)
 
-Prepared lists for static scenery ([static_list.h](../../port/static_list.h)). b257 profiled in Heaven: frame
+The Crisis Core way for static scenery ([static_list.h](../../port/static_list.h)). b257 profiled in Heaven: frame
 22.85 M cycles, `atomic` 11.1 M, `mesh` 5.8 M for 117 calls (~50 k cycles and 146 instruction-cache misses a call).
 A static atomic's draw is recorded once from a forgotten state shadow, with the per-mesh CALL replays off, and kept
 as its own list (state + texture + light + draws, RET) with copies of the mesh cache slots it reads; the vertex and
@@ -158,7 +158,7 @@ b256 also showed the far skin level alone saves nothing on the CPU (`p4_skin_far
 `p4_cull_far` 4000 with `p4_cull_min_vertices` 1200 (only Margaret dropped) saves nothing: the b246 culling gain came
 from the static atomics' GE time crossing the step, not from Margaret. Kept on: they are what the GE will need once
 the CPU is lower. Next: where the drawn frame's CPU goes (profiled), and the prepared-list path (one CALL a mesh,
-invalidated at the game's write sites) from the prepared-list comparison.
+invalidated at the game's write sites) from the Crisis Core comparison.
 
 ## b256 (superseded by b257): far stand-ins instead of culling (2026-11-14)
 

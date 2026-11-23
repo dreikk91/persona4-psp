@@ -155,7 +155,11 @@ static void tex2d_report(void)
         }
         if (best < 0)
             break;
-        p4_log("tex2d %dx%dx%d binds %u raster %x\n", tex2d[best].w, tex2d[best].h, tex2d[best].depth, tex2d[best].binds, (unsigned)tex2d[best].r);
+        { /* b483: swizzled (levels) or rows, read now from the raster */
+            const SwizzleHead *sh = swizzle_head(tex2d[best].r->originalPixels);
+            p4_log("tex2d %dx%dx%d binds %u raster %x swizzled %d levels %u pixels %x\n", tex2d[best].w, tex2d[best].h, tex2d[best].depth,
+                   tex2d[best].binds, (unsigned)tex2d[best].r, sh != 0, sh ? sh->levels : 0, (unsigned)tex2d[best].r->originalPixels);
+        }
         tex2d[best].binds = 0;
     }
     free(tex2d), tex2d = 0;
@@ -177,9 +181,16 @@ static void bind_raster(Raster *r, int wrap)
     rtt_sampled += r && r != &display_raster && rtt_find(r); /* b330 */
     if (p4_clut32 && r && r->depth == 32 && r != &display_raster && !rtt_find(r))
         r = clut32_find(r); /* b370 */
+    else if (p4_swz_copy && tex2d_now && r && (r->depth == 8 || r->depth == 4) && r != &display_raster && !rtt_find(r))
+        r = swz_find(r); /* b484 */
     prof_begin(PROF_TBIND);
     bind_raster_body(r, wrap);
     prof_end(PROF_TBIND);
+    if (clut32_slots && r && (const char *)r >= (const char *)clut32_slots && (const char *)r < (const char *)(clut32_slots + CLUT32_SLOTS)) {
+        const Clut32 *slot = (const Clut32 *)((const char *)r - offsetof(Clut32, copy));
+        if (slot->pw) /* b491: the 2D UVs span the prescaled part of the buffer */
+            texture_w = slot->pw, texture_h = slot->ph;
+    }
     textures_bound += kept_textures == kept;
 }
 static void bind_raster_body(Raster *r, int wrap)
@@ -815,7 +826,7 @@ int p4_draw_tv_ring(const float (*outer)[2], int outer_count, const float (*inne
     set_blend(BLEND_NORMAL);
     submit_tv_fan(outer_count, fan);
     sceGuDisable(GU_STENCIL_TEST);
-    ge_time_end(timed, GT_2D);
+    ge_time_end(timed, GT_RING);
     prof_end(PROF_2D);
     return 1;
 }
@@ -897,7 +908,7 @@ void p4_draw_texture_tint(unsigned rgba, float x, float y, float mask_x, float m
     sceGuDrawArray(GU_SPRITES, format, 2, 0, out);
     sceGuDisable(GU_STENCIL_TEST);
     sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-    ge_time_end(timed, GT_2D);
+    ge_time_end(timed, GT_TINT);
     prof_end(PROF_2D);
 }
 
@@ -1177,7 +1188,7 @@ int p4_ui_quad_draw(const P4UiVertex *vertices)
     int timed = ge_time_begin();
     rtt_2d += rtt_target != 0;
     if (!list_room()) {
-        ge_time_end(timed, GT_2D);
+        ge_time_end(timed, GT_UIQ);
         prof_end(PROF_2D);
         return 1;
     }
@@ -1186,7 +1197,7 @@ int p4_ui_quad_draw(const P4UiVertex *vertices)
             float x = vertices[i].u.els.screen.x, y = vertices[i].u.els.screen.y;
             if (!(x == x && y == y && x < 1e6f && x > -1e6f && y < 1e6f && y > -1e6f)) {
                 nan_2d_dropped++;
-                ge_time_end(timed, GT_2D);
+                ge_time_end(timed, GT_UIQ);
                 prof_end(PROF_2D);
                 return 1;
             }
@@ -1218,7 +1229,7 @@ int p4_ui_quad_draw(const P4UiVertex *vertices)
         result = ui_draw_finish(GU_TRIANGLE_STRIP, 4, out);
     }
     prof_end(PROF_2FIN);
-    ge_time_end(timed, GT_2D);
+    ge_time_end(timed, GT_UIQ);
     prof_end(PROF_2D);
     return result;
 }

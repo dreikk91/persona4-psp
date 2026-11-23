@@ -1,6 +1,6 @@
 # Shuffle Time slowdown, b265, 2026-11-15
 
-Live diagnosis of the port. PSP was left in Shuffle Time's Help overlay after the battle. Screenshot: `${P4_HOST}/b265/slow_scene265.png`; preserved raw profile: `build/psplink_b265/experiments/slow_shuffle.log`.
+Quick live diagnosis requested while investigating Crisis Core. PSP was left in Shuffle Time's Help overlay after the battle. Screenshot: `${P4_HOST}/b265/slow_scene265.png`; preserved raw profile: `build/psplink_b265/experiments/slow_shuffle.log`.
 
 Before enabling section timers: frame about 188.5 ms (~5.3 FPS), CPU about 188.3 ms, GE wait about 0.009 ms. The static arena path is inactive: zero ordinary atomics and zero static mesh-list activity in these windows. No arena optimization was toggled or disabled during this diagnosis.
 

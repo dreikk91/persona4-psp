@@ -1912,6 +1912,8 @@ static void draw_meshes_body(MeshHeader *header, const V3 *position, float (*uv)
             if (sl_gate_now) { /* b442: only the cut chunks; the gated list drew the rest */
                 gate_draw_mesh(i, clip_this, draw_prim, remapped, out, used, vtype, model, near, material, modulate, &light);
             } else if (clip_this)
+/* Precompute lighting if possible
+Hardware lights are pretty costly, especially if you use specular. If you need them you need them, but try to use 1 or 2, not all four, if at all possible. */
                 draw_guarded_compact(prim, remapped, n, out, used, vtype, model, near, material, modulate, &light, 0, 0, 0, 0);
             else if (split_slot) /* b434: the first frame draws the split copy too, not the big triangles */
                 draw_mesh_vertices(GU_TRIANGLES, vtype, split_slot->indices, split_slot->idx, split_slot->v, material, modulate, &light);

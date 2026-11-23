@@ -66,7 +66,8 @@ static void ew_note(int op, unsigned target, unsigned ra, int r)
     ew_ring[i].t = sceKernelGetSystemTimeLow(), ew_ring[i].self = sceKernelGetThreadId(), ew_ring[i].target = target;
     ew_ring[i].ra = ra, ew_ring[i].op = op, ew_ring[i].r = r;
 }
-static const char *const ew_ops[] = { "sleep in", "sleep out", "wakeup", "cancel wakeup", "suspend", "resume", "direct sleep in", "direct sleep out" };
+static const char *const ew_ops[] = { "sleep in", "sleep out", "wakeup", "cancel wakeup", "suspend", "resume", "direct sleep in", "direct sleep out",
+                                      "cb sleep in", "cb sleep out" };
 static void ew_thread_state(SceUID id, const char *what)
 {
     SceKernelThreadInfo info;
@@ -131,6 +132,17 @@ int __wrap_sceKernelSleepThread(void)
     ew_note(6, 0, ra, 0);
     int r = __real_sceKernelSleepThread();
     ew_note(7, 0, ra, r);
+    return r;
+}
+/* b486: the callback variant too (battle results freeze, b485: user_main asleep in wait type 1 with no ring entry) */
+int __real_sceKernelSleepThreadCB(void);
+int __wrap_sceKernelSleepThreadCB(void)
+{
+    unsigned ra = (unsigned)__builtin_return_address(0);
+    ew_start();
+    ew_note(8, 0, ra, 0);
+    int r = __real_sceKernelSleepThreadCB();
+    ew_note(9, 0, ra, r);
     return r;
 }
 int WakeupThread(int id)

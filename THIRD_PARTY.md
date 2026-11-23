@@ -44,3 +44,9 @@ These projects are separate dependencies; the root MIT license does not replace 
 The legacy b164 preparation utility bundles third-party programs and an EBOOT. New source-build packages compile the EBOOT locally instead of including it; the upstream checkout is fetched separately. Generated `licenses/` and `THIRD_PARTY.md` files remain an inventory starting point, not proof of redistribution compliance. Preserve applicable license texts, copyright notices, build information and required corresponding source for the exact binaries, including bundled libraries and DLLs and any optionally bundled PSPDEV toolchain. Also include this repository's LICENSE and these scope notices for its own code.
 
 The EBOOT includes game-derived routines. A numerical data recipe or an asset-free package does not settle the rights to distribute that executable. Keep it local until those rights are established. Generated game archives, rebased data, audio and movies are outside the project license and must not be included in a source release.
+
+## meshoptimizer
+
+The offline static geometry compiler uses [zeux/meshoptimizer](https://github.com/zeux/meshoptimizer), v0.25, commit `6daea4695c48338363b08022d2fb15deaef6ac09`, by Arseny Kapoulkine and contributors. The selected source files and original MIT license are in `third_party/meshoptimizer/`. The Windows preparation package includes the host helper DLL and its license; the PSP executable does not link this library.
+
+The host helper is built with GNU g++ and statically links GCC runtime libraries under the GCC Runtime Library Exception. Their GPLv3 and exception texts are preserved in `third_party/gcc-runtime/` and copied into the utility notices.

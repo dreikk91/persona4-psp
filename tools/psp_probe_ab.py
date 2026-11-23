@@ -29,10 +29,13 @@ DEFAULTS.update(p4_ui_font=1, p4_ui_sprite=1, p4_font_skip=0, p4_calendar_skip=0
 FLOATS = {'p4_guard_big', 'p4_guard_tiny', 'p4_probe_depth_cut', 'p4_anim_far_depth', 'p4_panel_scale', 'p4_skin_lod_depth', 'p4_skin_far_depth'}
 DEFAULTS.update(p4_static_state_cache=0, p4_static_state_check=0)
 DEFAULTS.update(p4_2d_alpha_masks=1, p4_translucent_late=1)
-DEFAULTS.update(p4_skin_guard=0, p4_sync_skip_fresh=0, p4_sync_skip_check=0, p4_frame_census=0, p4_prof_clock=0, p4_matfx_env_ge=0, p4_frame_lazy=0, p4_guard_big=1.0, p4_anim_freeze=0, p4_static_list=1, p4_inst_batch=1, p4_clut32=1, p4_ge_raw=1, p4_cull_back=3, p4_keep_previous=0, p4_skin_guard_box=1, p4_im3d_cull=1, p4_feedback_sprites=1, p4_feedback_half=1, p4_screen_date=1, p4_gs_alpha_test=1, p4_alpha_write_test=1, p4_rtt_alpha=1, p4_timeline=0, p4_list_double=1)  # b356-b364, b370
+DEFAULTS.update(p4_skin_guard=0, p4_sync_skip_fresh=0, p4_sync_skip_check=0, p4_frame_census=0, p4_prof_clock=0, p4_matfx_env_ge=0, p4_frame_lazy=1, p4_guard_big=1.0, p4_anim_freeze=0, p4_static_list=1, p4_inst_batch=1, p4_clut32=1, p4_ge_raw=1, p4_cull_back=3, p4_keep_previous=0, p4_skin_guard_box=1, p4_im3d_cull=1, p4_feedback_sprites=1, p4_feedback_half=1, p4_screen_date=1, p4_gs_alpha_test=1, p4_alpha_write_test=1, p4_rtt_alpha=1, p4_timeline=0, p4_list_double=1)  # b356-b364, b370
 DEFAULTS.update(p4_clut32_min=0, p4_guard_tiny=0.0)  # b388
 DEFAULTS.update(p4_skin_wsplit=2, p4_clock_prof=0, p4_skin_nocolour=1, p4_skin_flat=1, p4_static_flat=1, p4_skin_drop_original=1)  # b390-b393
 DEFAULTS.update(p4_2d_null_add=0, p4_probe_tlevel=0, p4_probe_tfilter=0, p4_mip_bias=0, p4_probe_fill=0, p4_2d_lean=1, p4_2d_cache=1, p4_2d_texonly=1)  # b1393-b1401
+DEFAULTS.update(p4_static_pack=0, p4_static_pack_check=0)
+DEFAULTS.update(p4_col_cull=1, p4_col_cull_check=0, p4_eff_rotate=0, p4_eff_rotate_check=0, p4_world_defer=1, p4_tex2d_census=0, p4_swz_copy=1)
+DEFAULTS.update(p4_world_direct=1, p4_world_direct_check=0, p4_static_near=1)
 DEFAULTS.update(p4_ui_native=0)  # b450: restore the compatibility path after native UI probes
 DEFAULTS.update(p4_particle_vfpu=1, p4_particle_vfpu_check=0)
 DEFAULTS.update(p4_fx_skip_draw=0, p4_skip_model_lite=7)

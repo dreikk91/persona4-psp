@@ -12,7 +12,9 @@ enum { PROF_FRAME, PROF_ATOMIC, PROF_MESH, PROF_GUARD, PROF_SKIN, PROF_PTANK, PR
       PROF_DSTATE, PROF_DSKIP, PROF_DPOSE, PROF_DRESTORE, PROF_DCOLOR, PROF_DVIS, PROF_DFX, PROF_DFRAME,
       PROF_RPLAY, PROF_RLIGHT, PROF_RGUARD, PROF_FSYNC, PROF_FTRANS, PROF_ASCALE, PROF_AHANDLE, PROF_ACHILD, PROF_AADV, PROF_QFX, PROF_AENV, PROF_AIB, PROF_AFP, PROF_ASL,
       PROF_2STATE, PROF_2VERT, PROF_2FIN, PROF_2FLUSH,
-      PROF_LFIND, PROF_LSTATE, PROF_LMAT, PROF_LBITS, PROF_LLIGHT, PROF_LTEX, PROF_LCALL, PROF_SECTIONS }; /* b1398: inside 2d; b445: inside asl */
+      PROF_LFIND, PROF_LSTATE, PROF_LMAT, PROF_LBITS, PROF_LLIGHT, PROF_LTEX, PROF_LCALL,
+      PROF_WPASS, PROF_WDIR, PROF_WLTM, PROF_WKEY, PROF_WVIS, PROF_WEMIT,
+      PROF_CWORLD, PROF_CWALL, PROF_CFLOOR, PROF_CATOM, PROF_CRW, PROF_CBOX, PROF_CGRID, PROF_MSCALE, PROF_MHAND, PROF_MMODE, PROF_AMUL, PROF_ATICK, PROF_PEMIT, PROF_PUPD, PROF_PCOMMIT, PROF_PDATA, PROF_PKEY, PROF_PTRAIL, PROF_WFLUSH, PROF_SECTIONS }; /* b477: particles */ /* b475: mdlAdvanceModel's callees */ /* b464: field collision */ /* b454: world_direct.h */ /* b1398: inside 2d; b445: inside asl */
 enum { PC_COUNT = 5 };
 /* counter words read per section edge: cpu cycles, stall, memory stall, imiss, dmiss (b73 read all 19, which itself
    cost a visible part of the frame at ~800 section edges a frame) */
@@ -29,7 +31,9 @@ static const char *const prof_names[PROF_SECTIONS] = { "frame", "atomic", "mesh"
     "aframe", "aattach", "alayer", "actrl", "afx", "amotion",
     "ablend", "arebase", "apose", "kadd", "kset", "kblend", "kmat", "kanim", "kframe", "kinterp", "tbind", "lbind",
     "dstate", "dskip", "dpose", "drestore", "dcolor", "dvis", "dfx", "dframe", "rplay", "rlight", "rguard", "fsync", "ftrans", "ascale", "ahandle", "achild", "aadv", "qfx", "aenv", "aib", "afp", "asl", "2state", "2vert", "2fin", "2flush",
-    "lfind", "lstate", "lmat", "lbits", "llight", "ltex", "lcall" };
+    "lfind", "lstate", "lmat", "lbits", "llight", "ltex", "lcall",
+    "wpass", "wdir", "wltm", "wkey", "wvis", "wemit",
+    "cworld", "cwall", "cfloor", "catom", "crw", "cbox", "cgrid", "mscale", "mhand", "mmode", "amul", "atick", "pemit", "pupd", "pcommit", "pdata", "pkey", "ptrail", "wflush" };
 static const volatile unsigned *prof_regs;
 static int prof_state; /* 0 not tried, 1 live, -1 none */
 static unsigned prof_at[PROF_SECTIONS][PC_COUNT], prof_depth[PROF_SECTIONS], prof_calls[PROF_SECTIONS];
@@ -283,7 +287,7 @@ static unsigned drawn_tick_of(const void *root); /* rwsky.c, b425 */
 /* b422 (with p4_prof_clock or the thread profiler): the profiler sections inside a queued model, by model key */
 static const unsigned char mc_sec[] = { PROF_AFRAME, PROF_AATTACH, PROF_ALAYER, PROF_ACTRL, PROF_AFX, PROF_AMOTION, PROF_ABLEND,
     PROF_AREBASE, PROF_APOSE, PROF_KADD, PROF_KSET, PROF_KMAT, PROF_KINTERP, PROF_KFRAME, PROF_DSTATE, PROF_DPOSE, PROF_DVIS,
-    PROF_DFX, PROF_DFRAME, PROF_FTRANS, PROF_ASCALE, PROF_AHANDLE, PROF_ACHILD, PROF_AADV, PROF_QATTACH, PROF_QEFFECT, PROF_QFX };
+    PROF_DFX, PROF_DFRAME, PROF_FTRANS, PROF_ASCALE, PROF_AHANDLE, PROF_ACHILD, PROF_AADV, PROF_QATTACH, PROF_QEFFECT, PROF_QFX, PROF_MSCALE, PROF_MHAND, PROF_MMODE, PROF_AMUL, PROF_ATICK };
 enum { MC_SECS = sizeof mc_sec };
 static unsigned mc_cyc[MC_KEYS][MC_SECS];
 static unsigned mc_tick0, mc_other;
@@ -350,14 +354,17 @@ void __wrap_mdlQueueModelForDraw(void *queue, void *model)
                    mc_key[best].unseen / ticks, mc_key[best].unseen * 100 / ticks % 100, mc_key[best].unseen_us / ticks);
             if (n < 4) { /* the costliest four: their sections, us each */
                 char line[256];
-                int at = 0;
-                for (int k = 0; k < MC_SECS && at < 220; k++) {
-                    unsigned us = mc_cyc[best][k] / 333u / mc_key[best].calls;
+                int at = 0, part = 0;
+                for (int k = 0; k <= MC_SECS; k++) { /* b474: lines of 6 sections (p4_log cuts long lines) */
+                    unsigned us = k < MC_SECS ? mc_cyc[best][k] / 333u / mc_key[best].calls : 0;
                     if (us)
-                        at += snprintf(line + at, sizeof line - at, " %s %u", prof_names[mc_sec[k]], us);
+                        at += snprintf(line + at, sizeof line - at, " %s %u", prof_names[mc_sec[k]], us), part++;
+                    if (at && (part == 6 || k == MC_SECS)) {
+                        line[at] = 0;
+                        p4_log("model census sections type %u id %u (us each):%s\n", mc_key[best].key >> 16, mc_key[best].key & 0xffff, line);
+                        at = part = 0;
+                    }
                 }
-                line[at] = 0;
-                p4_log("model census sections type %u id %u (us each):%s\n", mc_key[best].key >> 16, mc_key[best].key & 0xffff, line);
             }
             mc_key[best].us = ~0u;
         }
@@ -366,6 +373,22 @@ void __wrap_mdlQueueModelForDraw(void *queue, void *model)
         mc_other = 0, mc_tick0 = p4_anim_tick;
     }
 }
+/* b475: what mdlAdvanceModel calls outside its sections (Heaven field model 102: ~2 ms a tick unsectioned) */
+P4_WRAP_VOID(mdlEffectListSetUniformScale, PROF_MSCALE, (int *list, float *scale), (list, scale))
+P4_WRAP_VOID(mdlEffectListReleaseHandles, PROF_MHAND, (unsigned *list), (list))
+P4_WRAP_VOID(mdlEffectListRefreshHandles, PROF_MHAND, (void *list), (list))
+P4_WRAP_VOID(mdlSetWrapperValue, PROF_MHAND, (unsigned draw, void *model), (draw, model))
+P4_WRAP_VOID(mdlClearWrapperHandle, PROF_MHAND, (unsigned draw), (draw))
+P4_WRAP_VOID(mdlRefreshSecondaryEffect, PROF_MHAND, (void *draw, void *model), (draw, model))
+P4_WRAP(int, mdlHasActiveMode, PROF_MMODE, (void *model), (model))
+/* b477: Heaven's ParticleReleaseEmitterAndUpdate (~0.67 M cycles a drawn frame): the emitter, the particle pass and its
+   per-particle effect objects */
+P4_WRAP_VOID(mdlEffectAdvanceEmitter, PROF_PEMIT, (void *object), (object))
+P4_WRAP_VOID(ParticleUpdateScaled, PROF_PUPD, (void *particle, float scale), (particle, scale))
+P4_WRAP_VOID(mdlEffectCommitChild, PROF_PCOMMIT, (void *record), (record))
+P4_WRAP_VOID(mdlEffectUpdateChildData, PROF_PDATA, (void *record, void *data), (record, data))
+P4_WRAP_VOID(mdlEffectSampleKeyState, PROF_PKEY, (void *particle, void *parameters, int frame, void *previous), (particle, parameters, frame, previous))
+P4_WRAP_VOID(mdlEffectUpdateParticleTrail, PROF_PTRAIL, (void *emitter, void *particle), (emitter, particle))
 P4_WRAP(int, mdlComputeIndexedAttachMatrix, PROF_QATTACH, (void *model, int index, void *destination), (model, index, destination))
 P4_WRAP_VOID(qsort, PROF_QSORT, (void *base, unsigned count, unsigned size, int (*compare)(const void *, const void *)), (base, count, size, compare))
 P4_WRAP_VOID(mdlEffectFlushWithTable, PROF_QEFFECT, (void *table, void *effect), (table, effect))
@@ -375,6 +398,50 @@ P4_WRAP_VOID(FldResource_QueueDrawCallbacksPrimary, PROF_QFLD, (void *list, void
 P4_WRAP_VOID(FldResource_QueueDrawCallbacksSecondary, PROF_QFLD, (void *list, void *resource), (list, resource))
 P4_WRAP(void *, PrimAllocQueueNode, PROF_QPRIM, (void), ())
 P4_WRAP_VOID(PrimAppendNode, PROF_QPRIM, (void *list, void *node), (list, node))
+/* b464: the field's collision. func_00394d70 = RpCollisionWorldForAllIntersections (retail MIPS, reassembled): its
+   triangle callback counted (col_tris), FldFrame_RaycastFieldWorlds the three sweeps a moving actor makes a tick,
+   FldFrame_RaycastSelectedWorld its floor ray. */
+unsigned p4_col_tris, p4_col_queries;
+static void *col_cb_real;
+static void *col_cb(void *i, void *sector, void *triangle, float distance, void *data)
+{
+    p4_col_tris++;
+    return ((void *(*)(void *, void *, void *, float, void *))col_cb_real)(i, sector, triangle, distance, data);
+}
+void *__real_func_00394d70(void *world, void *intersection, void *callback, void *data);
+void *__wrap_func_00394d70(void *world, void *intersection, void *callback, void *data)
+{
+    prof_begin(PROF_CWORLD);
+    void *saved = col_cb_real;
+    col_cb_real = callback;
+    p4_col_queries++;
+    void *r = __real_func_00394d70(world, intersection, col_cb, data);
+    col_cb_real = saved;
+    prof_end(PROF_CWORLD);
+    return r;
+}
+/* func_00394e70 = RpAtomicForAllIntersections (reassembled): the field's sphere sweeps go atomic by atomic through it */
+unsigned p4_col_atoms, p4_col_atris;
+static void *col_acb_real;
+static void *col_acb(void *i, void *triangle, float distance, void *data)
+{
+    p4_col_atris++;
+    return ((void *(*)(void *, void *, float, void *))col_acb_real)(i, triangle, distance, data);
+}
+void *__real_func_00394e70(void *atomic, void *intersection, void *callback, void *data);
+void *__wrap_func_00394e70(void *atomic, void *intersection, void *callback, void *data)
+{
+    prof_begin(PROF_CATOM);
+    void *saved = col_acb_real;
+    col_acb_real = callback;
+    p4_col_atoms++;
+    void *r = __real_func_00394e70(atomic, intersection, col_acb, data);
+    col_acb_real = saved;
+    prof_end(PROF_CATOM);
+    return r;
+}
+P4_WRAP(int, FldFrame_RaycastFieldWorlds, PROF_CWALL, (float *origin, float *vector, float fraction, int field), (origin, vector, fraction, field))
+P4_WRAP(unsigned, FldFrame_RaycastSelectedWorld, PROF_CFLOOR, (const void *line, void *hit), (line, hit))
 P4_WRAP_VOID(mdlEffectListInvokeEach, PROF_QFX, (int context, void *list), (context, list)) /* b279: the effects a queued model runs */
 /* RenderWare animation toolkit called from mdlAdvanceLayer (b141): RtAnimInterpolatorAddAnimTime, SetCurrentTime,
    Blend, SetCurrentAnim and RpHAnimHierarchyUpdateMatrices */
@@ -482,6 +549,12 @@ void p4_sec(int id, int begin)
             prof_begin(PROF_AFRAME + id);
         else
             prof_end(PROF_AFRAME + id);
+    }
+    if (id == 20 || id == 21) { /* b476: amul, atick */
+        if (begin)
+            prof_begin(id == 20 ? PROF_AMUL : PROF_ATICK);
+        else
+            prof_end(id == 20 ? PROF_AMUL : PROF_ATICK);
     }
     if (id >= 16 && id <= 19) { /* b279: 19 aadv, mdlAdvanceModel as mdlQueueModelForDraw calls it (inclusive) */
         if (begin)

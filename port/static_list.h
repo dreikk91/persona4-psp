@@ -105,6 +105,7 @@ typedef struct {
     unsigned gchurn;  /* b289: guard lists dropped soon after recording, in a row */
     unsigned char indexed; /* b418: kept its index lists (p4_static_flat off or sl_flatten refused) */
     unsigned char why; /* b355: why the last list was refused or dropped (SL_WHY_*), for the no-list counters */
+    void *offline; /* source binding and an immutable relocated geometry packet */
 } StaticList;
 typedef struct {
     Geometry geometry;
@@ -267,8 +268,10 @@ static void sl_bury(void *p)
         free(sl_grave[i].p), sl_grave[i].p = 0;
     free(p);
 }
+static void static_pack_drop(StaticList *e);
 static void sl_drop(StaticList *e)
 {
+    static_pack_drop(e);
     if (e->meshes) {
         for (int i = 0; i < e->meshes->count; i++) {
             sl_drop(&e->meshes->part[i].entry);
@@ -1651,6 +1654,8 @@ P4_HOT static int sl_memo_try(const Geometry *g, const Matrix *model, const V3 *
     sl_forget();
     replay.valid = 0;
     sl_memo_hits++;
+    if (wd_watch)
+        wd_note(sl_memo.e, sl_memo.list, sl_memo.draws, model, normals, 1);
     mesh_draw_calls += sl_memo.draws;
     draws_since_stall += sl_memo.draws;
     if (draws_since_stall >= (unsigned)p4_draw_batch && !gu_object_stack_depth)
@@ -1685,6 +1690,85 @@ static void sl_tex_keep(StaticList *e)
 }
 /* b442: a crossing atomic (or one with a gated list): 1 drawn (gated list plus its cut chunks), 0 the body draws it
    (the gated list was just recorded off the screen, or cannot be), -1 the usual path decides. */
+/* b462: a gated list's draw (sl_gate_draw's hit, and world_direct.h's direct draw of a crossing atomic): the gates
+   for this view, the CALL of a free copy, the closed chunks cut from the kept copies. 0: the copy is busy */
+static int sl_gate_emit(StaticList *e, const Geometry *g, const Matrix *model, const V3 *normals, int modulate, float near)
+{
+    float (*uv)[2] = g->numTexCoordSets ? g->texCoords[0] : 0;
+    const float *sphere = g->morphTarget->sphere;
+    SlGates *gs = e->gates;
+    int k = cache_frame % 3;
+    if ((int)(ge_finished - gs->seq[k]) < 0) { /* b447: the GE may still read this copy: the usual path this frame */
+        sl_gate_busy++;
+        return 0; /* not -1: the usual hit path would CALL copy 0 with its gates as they were left */
+    }
+    unsigned *cp = gs->copy[k];
+    int cut = 0, changed = 0;
+    for (int i = 0; i < gs->n; i++) {
+        int open = replay_unguarded(model, gs->g[i].sphere) || guard_sphere_world(model, gs->g[i].sphere, near);
+        gs->cut[i] = !open, cut += !open;
+        unsigned after = (unsigned)(cp + gs->g[i].after) & 0x0fffffff, w = open ? 0 : 0x08u << 24 | (after & 0xffffff);
+        if (cp[gs->g[i].word] != w) /* b447: only the gates that changed since this copy's last use */
+            cp[gs->g[i].word] = w, changed = 1;
+    }
+    if (changed)
+        sceKernelDcacheWritebackRange(cp, (gs->words + 1) * 4);
+    gs->seq[k] = ge_queued + 1; /* the list this CALL goes into */
+    sl_gate_calls++, sl_gate_open += gs->n - cut, sl_gate_closed += cut;
+    begin_frame();
+    gu_mesh_begin();
+    set_camera();
+    sl_model(e, model);
+    unsigned *l = gu_list->current;
+    l[0] = 0x10u << 24 | ((unsigned)cp >> 8 & 0xf0000); /* BASE */
+    l[1] = 0x0Au << 24 | ((unsigned)cp & 0xffffff);      /* CALL */
+    gu_list->current = l + 2;
+    sl_forget();
+    replay.valid = 0;
+    sl_hits++;
+    mesh_draw_calls += e->draws;
+    draws_since_stall += e->draws;
+    if (draws_since_stall >= (unsigned)p4_draw_batch && !gu_object_stack_depth)
+        stall_flush();
+    if (cut && gs->mesh) { /* b443: the closed chunks cut straight from the kept copies */
+        sl_gate_now = gs;
+        set_matrix(GU_MODEL, model);
+        SceneLight light = scene_lights();
+        Mat4 mm;
+        guard_matrix_cached(mm, model);
+        draw_material_ge = !normals && modulate && p4_material_state == 2; /* b447: as the body's ge_colour */
+        for (int j = 0; j < gs->nmesh; j++) {
+            SlGateMesh *gm = &gs->mesh[j];
+            unsigned short first[64], count[64];
+            int nr = sl_gate_ranges(gm->mi, first, count, 64);
+            if (!nr)
+                continue;
+            void **texture = gm->material->texture;
+            bind_mask(gm->material->colour >> 24);
+            bind_raster(texture ? *texture : 0, GU_REPEAT);
+            int lit = (gm->vtype & GU_NORMAL_BITS) != 0;
+            guard_vfpu((const V3 *)((const char *)gm->v + (lit ? offsetof(Vertex3DN, x) : offsetof(Vertex3D, x))), gm->nverts,
+                       (const float (*)[4])mm, near, guard_clip, guard_code, lit ? sizeof(Vertex3DN) : sizeof(Vertex3D));
+            for (int r = 0; r < nr; r++)
+                draw_guarded(gm->prim, gm->idx + first[r], count[r], gm->v, gm->vtype, near, gm->material, modulate, &light);
+        }
+        draw_material_ge = 0;
+        sl_gate_now = 0;
+        sl_gate_light++;
+        replay.valid = 0;
+    } else if (cut) { /* the closed chunks, cut on the CPU */
+        sl_gate_now = gs;
+        draw_geometry = (Geometry *)g;
+        draw_meshes_body(g->mesh, g->morphTarget->verts, uv, g->preLit, g->numVertices, model, modulate, normals, sphere);
+        draw_geometry = 0;
+        sl_gate_now = 0;
+        replay.valid = 0; /* the partial draw must not be replayed for another instance */
+    }
+    if (wd_watch) /* b462 world_direct.h learns the gated list */
+        wd_note_gate(e, model, normals);
+    return 1;
+}
+
 static int sl_gate_draw(StaticList *e, const Geometry *g, const Matrix *model, const V3 *normals, float (*uv)[2], int modulate,
                         const float *sphere, float near)
 {
@@ -1698,77 +1782,8 @@ static int sl_gate_draw(StaticList *e, const Geometry *g, const Matrix *model, c
     int hit = e->list && e->gates && same && !g->locked && e->state == state && e->materials == materials && sl_tex_same(e, texgen) &&
               e->bits == bits && e->light == light;
     e->stamp = cache_frame;
-    if (hit) {
-        SlGates *gs = e->gates;
-        int k = cache_frame % 3;
-        if ((int)(ge_finished - gs->seq[k]) < 0) { /* b447: the GE may still read this copy: the usual path this frame */
-            sl_gate_busy++;
-            return 0; /* not -1: the usual hit path would CALL copy 0 with its gates as they were left */
-        }
-        unsigned *cp = gs->copy[k];
-        int cut = 0, changed = 0;
-        for (int i = 0; i < gs->n; i++) {
-            int open = replay_unguarded(model, gs->g[i].sphere) || guard_sphere_world(model, gs->g[i].sphere, near);
-            gs->cut[i] = !open, cut += !open;
-            unsigned after = (unsigned)(cp + gs->g[i].after) & 0x0fffffff, w = open ? 0 : 0x08u << 24 | (after & 0xffffff);
-            if (cp[gs->g[i].word] != w) /* b447: only the gates that changed since this copy's last use */
-                cp[gs->g[i].word] = w, changed = 1;
-        }
-        if (changed)
-            sceKernelDcacheWritebackRange(cp, (gs->words + 1) * 4);
-        gs->seq[k] = ge_queued + 1; /* the list this CALL goes into */
-        sl_gate_calls++, sl_gate_open += gs->n - cut, sl_gate_closed += cut;
-        begin_frame();
-        gu_mesh_begin();
-        set_camera();
-        sl_model(e, model);
-        unsigned *l = gu_list->current;
-        l[0] = 0x10u << 24 | ((unsigned)cp >> 8 & 0xf0000); /* BASE */
-        l[1] = 0x0Au << 24 | ((unsigned)cp & 0xffffff);      /* CALL */
-        gu_list->current = l + 2;
-        sl_forget();
-        replay.valid = 0;
-        sl_hits++;
-        mesh_draw_calls += e->draws;
-        draws_since_stall += e->draws;
-        if (draws_since_stall >= (unsigned)p4_draw_batch && !gu_object_stack_depth)
-            stall_flush();
-        if (cut && gs->mesh) { /* b443: the closed chunks cut straight from the kept copies */
-            sl_gate_now = gs;
-            set_matrix(GU_MODEL, model);
-            SceneLight light = scene_lights();
-            Mat4 mm;
-            guard_matrix_cached(mm, model);
-            draw_material_ge = !normals && modulate && p4_material_state == 2; /* b447: as the body's ge_colour */
-            for (int j = 0; j < gs->nmesh; j++) {
-                SlGateMesh *gm = &gs->mesh[j];
-                unsigned short first[64], count[64];
-                int nr = sl_gate_ranges(gm->mi, first, count, 64);
-                if (!nr)
-                    continue;
-                void **texture = gm->material->texture;
-                bind_mask(gm->material->colour >> 24);
-                bind_raster(texture ? *texture : 0, GU_REPEAT);
-                int lit = (gm->vtype & GU_NORMAL_BITS) != 0;
-                guard_vfpu((const V3 *)((const char *)gm->v + (lit ? offsetof(Vertex3DN, x) : offsetof(Vertex3D, x))), gm->nverts,
-                           (const float (*)[4])mm, near, guard_clip, guard_code, lit ? sizeof(Vertex3DN) : sizeof(Vertex3D));
-                for (int r = 0; r < nr; r++)
-                    draw_guarded(gm->prim, gm->idx + first[r], count[r], gm->v, gm->vtype, near, gm->material, modulate, &light);
-            }
-            draw_material_ge = 0;
-            sl_gate_now = 0;
-            sl_gate_light++;
-            replay.valid = 0;
-        } else if (cut) { /* the closed chunks, cut on the CPU */
-            sl_gate_now = gs;
-            draw_geometry = (Geometry *)g;
-            draw_meshes_body(g->mesh, g->morphTarget->verts, uv, g->preLit, g->numVertices, model, modulate, normals, sphere);
-            draw_geometry = 0;
-            sl_gate_now = 0;
-            replay.valid = 0; /* the partial draw must not be replayed for another instance */
-        }
-        return 1;
-    }
+    if (hit)
+        return sl_gate_emit(e, g, model, normals, modulate, near);
     if (e->list || e->gates)
         sl_drop(e);
     if ((int)(e->retry - cache_frame) > 0 || g->locked)
@@ -1915,6 +1930,8 @@ P4_HOT static int sl_draw(StaticList *e, const void *atomic, const Geometry *g, 
     if (hit && !((p4_static_list_check || p4_static_uv_check) && !(cache_frame & 63))) {
     draw_list:
         prof_begin(PROF_LCALL);
+        if (wd_watch) /* b453 world_direct.h learns this call */
+            wd_note(e, e->list, e->draws, model, normals, 0);
         begin_frame();
         gu_mesh_begin();
         set_camera();
@@ -2040,6 +2057,7 @@ P4_HOT static int sl_mesh_draw(SlMeshSet *s, const Matrix *model, const V3 *norm
     return 1;
 }
 
+#include "static_pack_runtime.h"
 /* The complete atomic stays the first choice. Split only entries refused while recording or crossing the band. */
 P4_HOT static int sl_try(const void *atomic, const Geometry *g, const Matrix *model, const V3 *normals)
 {
@@ -2054,6 +2072,8 @@ P4_HOT static int sl_try(const void *atomic, const Geometry *g, const Matrix *mo
     prof_end(PROF_LFIND);
     if (!e)
         return 0;
+    if (static_pack_try(e, g, model, normals))
+        return 1;
     sl_rtt_hits += rtt_target != 0;
     if (e->meshes && (!p4_static_mesh_lists || !sl_mesh_same(e->meshes, g, normals))) {
         sl_drop(e);
@@ -2083,6 +2103,7 @@ P4_HOT static int sl_try(const void *atomic, const Geometry *g, const Matrix *mo
 }
 static void sl_report(void)
 {
+    static_pack_report();
     p4_log("static UV pack %d check %d: vertices %u vertex_bytes_saved %u temp_bytes %u refused %u checks %u diffs %u per 256 frames\n",
            p4_static_uv_pack, p4_static_uv_check, static_uv_vertices, static_uv_bytes, static_uv_temp_bytes, static_uv_refused, static_uv_checks, static_uv_diffs);
     p4_log("static UV kept float: small %u translucent %u matfx %u format %u range %u memory %u (lists retried %u) per 256 frames\n",

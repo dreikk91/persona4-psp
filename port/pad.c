@@ -37,13 +37,18 @@ enum { ROUTE_MAX = 1024 };
 static struct RouteStep { unsigned char kind, x, y; unsigned at_ms, buttons; } *route; /* heap: .bss is full */
 static int route_count;
 enum { ROUTE_TEXT = 16384 };
+/* b463: a route started in the middle of the game (a walk to replay for A/B): poke p4_route_go 1, and route_mid.txt
+   (times from 0) is read and replayed from now; it lets go of the pad one second after its last step. */
+volatile unsigned p4_route_go;
+static unsigned route_base_ms;
 
-static void load_route(void)
+static void load_route_file(const char *name)
 {
-    SceUID fd = sceIoOpen("route.txt", PSP_O_RDONLY, 0);
+    SceUID fd = sceIoOpen(name, PSP_O_RDONLY, 0);
     if (fd < 0)
         return;
     char *route_text = malloc(ROUTE_TEXT);
+    free(route), route_count = 0;
     route = malloc(ROUTE_MAX * sizeof *route);
     if (!route_text || !route) {
         sceIoClose(fd);
@@ -75,12 +80,17 @@ static void load_route(void)
     }
     free(route_text);
 }
+static void load_route(void) { load_route_file("route.txt"); }
 
 /* ORs the route's buttons into pad and, once the route has moved the stick, sets the stick */
 static void route_apply(SceCtrlData *pad)
 {
-    unsigned now = sceKernelGetSystemTimeLow() / 1000, held = 0;
+    unsigned now = sceKernelGetSystemTimeLow() / 1000 - route_base_ms, held = 0;
     int stick = -1;
+    if (route_base_ms && now > route[route_count - 1].at_ms + 1000) { /* a mid-game route is over: the pad is the player's */
+        route_count = 0;
+        return;
+    }
     for (int i = 0; i < route_count && route[i].at_ms <= now; i++) {
         if (route[i].kind == 'P' && now < route[i].at_ms + 100)
             pad->Buttons |= route[i].buttons;
@@ -126,6 +136,13 @@ int scePadRead(int port, int slot, unsigned char *out)
     if (port != 0)
         return 0;
     sceCtrlPeekBufferPositive(&pad, 1);
+    if (p4_route_go) {
+        void p4_log(const char *fmt, ...);
+        p4_route_go = 0;
+        route_base_ms = sceKernelGetSystemTimeLow() / 1000;
+        load_route_file("route_mid.txt");
+        p4_log("ROUTE mid %d steps from %u ms\n", route_count, route_base_ms);
+    }
     if (route_count)
         route_apply(&pad);
     /* p4.log: PAD = a press (for reading), PADS = the buttons held after a change, STICK = the left stick in 16 steps */

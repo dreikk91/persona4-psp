@@ -4,7 +4,7 @@
 
 The current utility builds **EBOOT.PBP on your PC**, then prepares resources from your Persona 4 USA or supported USA UNDUB (`SLUS-21782`) ISO. New preparation packages contain our port sources and conversion tools. They contain **no prebuilt game EBOOT, compiled game objects, retail executable, rebased game data or build-specific numerical data recipe**. The pinned upstream decompilation is fetched separately.
 
-The older prebuilt-EBOOT b164 download has been withdrawn. The current source-build package is published as **P4-PSP-b450-windows-x64.zip** in the [b450 pre-release](https://github.com/dreikk91/persona4-psp/releases/tag/b450); creating a package locally does not publish it.
+The older prebuilt-EBOOT b164 download has been withdrawn. The current source-build package is published as **P4-PSP-b493-windows-x64.zip** in the [b493 pre-release](https://github.com/dreikk91/persona4-psp/releases/tag/b493); creating a package locally does not publish it.
 
 1. Extract the complete new utility archive to a PC folder. Keep `Prepare P4.exe`, `_internal`, `helpers`, `source`, `prepare.json` and any included `toolchain` folder together.
 2. Run **Prepare P4.exe** and select your USA or supported USA UNDUB ISO and an output folder outside the utility folder.
@@ -60,7 +60,7 @@ Use `Prepare P4.exe` in place of `python tools/psp_prepare.py` when running the 
 
 ```powershell
 python -m pip install -r tools/requirements-prepare.txt
-python tools/psp_prepare_release.py --vgmstream ./helpers/vgmstream --freeze --zip --pspdev ./toolchain/pspdev --out ./build/P4-PSP-b450-windows-x64
+python tools/psp_prepare_release.py --vgmstream ./helpers/vgmstream --freeze --zip --pspdev ./toolchain/pspdev --out ./build/P4-PSP-b493-windows-x64
 ```
 
 Supply the complete Windows vgmstream CLI folder, including DLLs and notices. The generator freezes Python/Tk/PyAV/Pillow, bundles conversion helpers, copies the port/build sources and writes their SHA256 manifest. `package.json` inventories the distributed files. Packages do not include PSPDEV by default: the utility downloads the archive named in `tools/build_reference.json` (`recommended_toolchain`) and checks its SHA256. `--bundle-toolchain` with `--pspdev` includes a compiler instead; a bundled compiler takes priority over a user's existing `PSPDEV`, and an explicit `--pspdev` overrides both. The copied `BUILDINFO.txt` replaces that compiler's local installation paths with `${PSPDEV}` while retaining its version/source information; the original file is unchanged. Review the exact third-party binaries' corresponding-source requirements before redistribution.
@@ -70,3 +70,21 @@ Static `.a` / `.la` files in the compiler's `lib/bfd-plugins` directory are omit
 The legacy packager remains available explicitly through `--legacy-prebuilt --release build/release_b164`. It includes an EBOOT and the older numerical reconstruction recipe. It is not the default source-build mode.
 
 Packages are created locally. This command does not upload or replace GitHub releases. Local compilation changes what the package distributes; it does not establish legal clearance for the upstream sources, port code or tools. See the repository's license scope and publication notes.
+
+## Offline static geometry (since b451)
+
+New source packages additionally generate `p4static.bin` from the selected ISO and install it beside EBOOT in both build-only and full preparation. The host-only meshoptimizer helper is bundled with its MIT license and verified SHA256; players need no C++ compiler. Building the utility package itself now requires a host `g++` compiler for that helper.
+
+The pack contains integer vertices, optimized indices/strips, conservative per-mesh bounding boxes and relocatable geometry-only GE command templates. Runtime textures, lighting, materials, matrices and GS alpha-test handling remain dynamic. Vertex positions are s8 where the shared grid fits and s16 otherwise; normals are s8, UVs and indices are u16. Vertex buffers contain no floats. Matrix/UV decode parameters remain float metadata as required by GE state.
+
+Position quantization uses one absolute quarter-unit lattice in model space, including across different s8/s16 centres. Simplification locks borders, attribute seams and material boundaries, uses UV/normal/colour attributes and caps its absolute error at 0.125 model units. Degenerate/flipped quantized triangles are rejected. Independent object transforms and screen-space visual quality still require scene testing; an error bound is not a pixel-equivalence guarantee.
+
+`p4_static_pack=0` is the default pending PSP validation. Developers can enable it before loading a scene and use `p4_static_pack_check=1` to rehash source inputs periodically. Check the `static pack` log for actual s8/s16 hits and rejected data; this mode checks source identity, not rendered pixels. Skins, morphing, MatFX, transparent texels/vertices, tinted unlit materials, extreme UVs, out-of-range integer positions and geometry requiring camera-dependent CPU clipping retain the original renderer. That fallback can still use float vertices; the no-float rule applies to the new pack's vertex streams.
+
+Reproduce generation:
+
+```powershell
+python tools/psp_static_pack.py --iso './Persona 4 (UNDUB).iso' --out ./build/static/p4static.bin
+```
+
+The adjacent JSON reports s8/s16 variants, triangle counts, quantization/simplification errors and exclusions. `--error 0` requests exact simplification; stripification and position/UV quantization still apply. Generated packs and reports contain game-derived data and stay local.

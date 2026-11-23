@@ -154,7 +154,7 @@ def main():
                 '--name', 'Prepare P4', '--distpath', str(temp / 'dist'), '--workpath', str(temp / 'work'),
                 '--specpath', str(temp), '--paths', str(ROOT / 'tools'), '--collect-all', 'av',
                 '--exclude-module', 'imageio_ffmpeg', '--exclude-module', 'numpy',
-                '--hidden-import', 'PIL.Image',
+                '--hidden-import', 'PIL.Image', '--hidden-import', 'ctypes',
                 '--hidden-import', 'tkinter', '--hidden-import', 'tkinter.filedialog', '--hidden-import', 'tkinter.messagebox',
                 '--hidden-import', 'tkinter.ttk', '--add-data', str(ROOT / 'tools/audio_vag_encoder.cs') + ';tools',
                 '--hidden-import', 'runpy', '--hidden-import', 'concurrent.futures.thread',
@@ -176,6 +176,16 @@ def main():
         copy_toolchain(compiler, out / 'toolchain/pspdev')
     (out / 'prepare.json').write_text(json.dumps(recipe, separators=(',', ':')) + '\n', encoding='utf-8')
     helpers = out / 'helpers'; helpers.mkdir()
+    from psp_meshopt import build_library
+    shutil.copyfile(build_library(), helpers / 'p4meshopt.dll')
+    if not args.legacy_prebuilt:
+        recipe['host_helpers_sha256'] = {'helpers/p4meshopt.dll': sha256(helpers / 'p4meshopt.dll')}
+        (out / 'prepare.json').write_text(json.dumps(recipe, separators=(',', ':')) + '\n', encoding='utf-8')
+    meshopt_notice = ROOT / 'third_party/meshoptimizer/LICENSE.md'
+    (out / 'licenses/meshoptimizer').mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(meshopt_notice, out / 'licenses/meshoptimizer/LICENSE.md')
+    for name in ('COPYING3', 'COPYING.RUNTIME'):
+        shutil.copyfile(ROOT / 'third_party/gcc-runtime' / name, out / 'licenses/meshoptimizer' / name)
     from psp_audio import build_encoder
     shutil.copyfile(build_encoder(), helpers / 'audio_vag_encoder.exe')
     shutil.copytree(args.vgmstream, helpers / 'vgmstream')
@@ -185,7 +195,7 @@ def main():
     shutil.copyfile(ROOT / 'LICENSE', out / 'LICENSE')
     shutil.copyfile(ROOT / 'THIRD_PARTY.md', out / 'PROJECT_NOTICES.md')
     (out / 'THIRD_PARTY.md').write_text(
-        'This package includes Python, Tcl/Tk, PyInstaller runtime, PyAV (with its FFmpeg libraries), Pillow and vgmstream.\n'
+        'This package includes Python, Tcl/Tk, PyInstaller runtime, PyAV (with its FFmpeg libraries), Pillow, meshoptimizer v0.25 and vgmstream.\n'
         'The FFmpeg program is not included: the utility downloads the gyan.dev FFmpeg 9.0.1 essentials build '
         'from https://github.com/GyanD/codexffmpeg/releases/tag/9.0.1 on first use.\n'
         'License texts are in licenses/ and helpers/vgmstream/COPYING.\n'
@@ -195,7 +205,7 @@ def main():
         'Upstream projects and source: https://www.python.org/ https://www.tcl.tk/ '
         'https://pyinstaller.org/ https://github.com/PyAV-Org/PyAV '
         'https://ffmpeg.org/ https://github.com/vgmstream/vgmstream https://github.com/python-pillow/Pillow '
-        'https://github.com/pspdev/pspdev https://github.com/pspdev/pspsdk\n'
+        'https://github.com/pspdev/pspdev https://github.com/pspdev/pspsdk https://github.com/zeux/meshoptimizer\n'
         'Before public redistribution, supply the corresponding source and notices required '
         'by the exact bundled third-party binaries.\n', encoding='utf-8')
     files = {p.relative_to(out).as_posix(): sha256(p) for p in sorted(out.rglob('*')) if p.is_file()}

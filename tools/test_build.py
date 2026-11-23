@@ -68,16 +68,17 @@ class SourceBuildTests(unittest.TestCase):
     def test_cache_rechecks_artifacts_and_rebuilds_corruption(self):
         with self.build_mocks(), patch.object(builder, 'run_stage', side_effect=self.fake_stage) as stage:
             release = self.invoke()
-            self.assertEqual(stage.call_count, 6)
+            self.assertEqual(stage.call_count, 7)
             calls = {call.args[1]: call.args[2] for call in stage.call_args_list}
             self.assertIn('--static', calls['psp_strips.py'])
             self.assertEqual(calls['psp_clut.py'], ['--iso', self.iso.resolve()])
+            self.assertEqual(calls['psp_static_pack.py'], ['--iso', self.iso.resolve()])
             self.assertIn('--asset-packs', calls['psp_hw_debug.py'])
             self.assertEqual(self.invoke(), release)
-            self.assertEqual(stage.call_count, 6)
+            self.assertEqual(stage.call_count, 7)
             (release / 'p4data.bin').write_bytes(b'corruption')
             self.invoke()
-            self.assertEqual(stage.call_count, 12)
+            self.assertEqual(stage.call_count, 14)
             self.assertEqual((release / 'p4data.bin').read_bytes(), b'data')
 
     def test_optional_strip_pack_is_checked_and_unknown_artifacts_are_rejected(self):
@@ -108,6 +109,18 @@ class SourceBuildTests(unittest.TestCase):
         (self.bundle / 'source/port/main.c').write_text('changed')
         with patch.object(builder, 'find_pspdev') as compiler:
             with self.assertRaisesRegex(ValueError, 'incomplete or changed'):
+                self.invoke()
+            compiler.assert_not_called()
+
+    def test_changed_host_optimizer_is_rejected_before_compiler(self):
+        helper = self.bundle / 'helpers/p4meshopt.dll'
+        helper.parent.mkdir()
+        helper.write_bytes(b'optimizer fixture')
+        self.config['host_helpers_sha256'] = {'helpers/p4meshopt.dll': builder.digest(helper)}
+        builder.save_json(self.bundle / 'prepare.json', self.config)
+        helper.write_bytes(b'changed')
+        with patch.object(builder, 'find_pspdev') as compiler:
+            with self.assertRaisesRegex(ValueError, 'optimizer helper'):
                 self.invoke()
             compiler.assert_not_called()
 
@@ -152,7 +165,7 @@ class SourceBuildTests(unittest.TestCase):
     def test_build_only_installs_consistent_files_without_media_or_complete_marker(self):
         release = self.folder / 'release'; release_fixture(release)
         manifest = builder.validate_result(release, 164)
-        for name in ('p4strips.bin', 'p4clut.bin'):
+        for name in ('p4strips.bin', 'p4clut.bin', 'p4static.bin'):
             (release / name).write_bytes(name.encode())
             manifest['artifact_sha256'][name] = builder.digest(release / name)
         builder.save_json(release / 'manifest.json', manifest)
@@ -162,7 +175,7 @@ class SourceBuildTests(unittest.TestCase):
             result = prepare(self.iso, self.folder / 'output', self.bundle, build_only=True)
             catalogue.assert_not_called(); movies.assert_not_called()
             self.assertEqual((result / 'EBOOT.PBP').read_bytes(), (release / 'EBOOT.PBP').read_bytes())
-            for name in ('p4strips.bin', 'p4clut.bin'):
+            for name in ('p4strips.bin', 'p4clut.bin', 'p4static.bin'):
                 self.assertEqual((result / name).read_bytes(), (release / name).read_bytes())
             self.assertTrue((result / 'build_manifest.json').exists())
             self.assertFalse((result / 'installation.json').exists())

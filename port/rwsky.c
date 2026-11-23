@@ -837,9 +837,11 @@ static int mip_level_size(const Raster *r, int level, int *wbytes, int *rows)
     *rows = (h + 7) & ~7;
     return *wbytes * *rows;
 }
+static int swizzle_mips_off; /* b489: swz copies (2D) keep level 0 only */
+static int swizzle_mips_alpha; /* b490: indexed levels keep the most opaque texel of each block (thin 2D lines survive) */
 static int mip_levels(const Raster *r)
 {
-    if (!p4_mip_build || r->width < p4_mip_min || r->height < p4_mip_min || (r->width & (r->width - 1)) || (r->height & (r->height - 1)))
+    if (swizzle_mips_off || !p4_mip_build || r->width < p4_mip_min || r->height < p4_mip_min || (r->width & (r->width - 1)) || (r->height & (r->height - 1)))
         return 1;
     int levels = 1;
     while (levels < MAX_MIPS && (r->width >> levels) * r->depth / 8 >= 16 && (r->height >> levels) >= 8)
@@ -860,7 +862,25 @@ static void mip_decimate(const Raster *r, int level, unsigned char *out, int str
                 memcpy(o + x * 4, row + sx * 4, 4);
             else if (r->depth == 16)
                 memcpy(o + x * 2, row + sx * 2, 2);
-            else if (r->depth == 8)
+            else if (swizzle_mips_alpha && r->palette && r->depth <= 8) { /* b490: the block's most opaque entry */
+                const unsigned *pal = (const unsigned *)r->palette;
+                int n = 1 << level, best = -1;
+                unsigned best_a = 0;
+                for (int by = 0; by < n; by++) {
+                    const unsigned char *br = r->originalPixels + ((y << level) + by) * r->stride;
+                    for (int bx = 0; bx < n; bx++) {
+                        int px = sx + bx;
+                        int e = r->depth == 8 ? br[px] : br[px >> 1] >> ((px & 1) * 4) & 15;
+                        unsigned a = pal[e] >> 24;
+                        if (best < 0 || a > best_a)
+                            best = e, best_a = a;
+                    }
+                }
+                if (r->depth == 8)
+                    o[x] = (unsigned char)best;
+                else
+                    o[x >> 1] |= best << ((x & 1) * 4);
+            } else if (r->depth == 8)
                 o[x] = row[sx];
             else
                 o[x >> 1] |= (row[sx >> 1] >> ((sx & 1) * 4) & 15) << ((x & 1) * 4);
@@ -1083,9 +1103,14 @@ static unsigned texture_epoch;
 static int sl_recording; /* b258 (static_list.h): a static list is being recorded */
 static const void *sl_tex[SL_TEX];
 static int sl_ntex; /* rasters bound while recording; > SL_TEX: too many, the list keeps the global key */
+/* b454: the last rasters changed, for world_direct.h: an entry checks only these against its own rasters */
+enum { RCHG = 32 };
+static struct { const void *r; unsigned gen; } rchg[RCHG];
+static unsigned rchg_n;
 static void raster_changed(const void *r)
 {
     texture_generation++;
+    rchg[rchg_n++ & (RCHG - 1)].r = r, rchg[(rchg_n - 1) & (RCHG - 1)].gen = texture_generation;
     if (rgen_full)
         return;
     if (!rgen && !(rgen = calloc(RGEN_SLOTS, sizeof *rgen))) {
@@ -1500,6 +1525,9 @@ int func_003f79b0(void *raster, void *device, int flags)
             p4_log("keep previous %d: frames started from the shown one %u\n", p4_keep_previous, keep_previous_copies), keep_previous_copies = 0;
         if (p4_clut32 || clut32_made)
             p4_log("clut32 %d: binds %u made %u (%u ms in all) full %u stale %u\n", p4_clut32, clut32_binds, clut32_made, clut32_ms, clut32_full, clut32_stale), clut32_binds = 0;
+        if (p4_swz_copy || swz_made)
+            p4_log("swz copy %d prescale %d: binds %u made %u prescaled %u\n", p4_swz_copy, p4_swz_prescale, swz_binds, swz_made,
+                   swz_prescaled), swz_binds = swz_made = swz_prescaled = 0;
         p4_log("hwperf n=%u ms=%u cpu_us=%u ge_wait_us=%u present_us=%u\n",
                samples, (after_present - window_start) / 1000,
                cpu_us / samples, ge_us / samples, vblank_us / samples);
@@ -1575,6 +1603,7 @@ int func_003f79b0(void *raster, void *device, int flags)
         work_shaded = work_ge_emitted = work_cpu_emitted = work_ge_draws = 0;
         void p4_vu0_report(unsigned frames);
         p4_vu0_report(256);
+        { void p4_eff_rotate_report(void); p4_eff_rotate_report(); }
         p4_log("textures swizzled %u bytes %u mipmapped %u mip_bytes %u mipmaps %d\n", swizzled_textures, swizzled_bytes, mip_textures, mip_bytes, p4_mipmaps);
         tex_census_report(); /* b394 */
         churn_report(256);
@@ -1621,6 +1650,7 @@ int func_003f79b0(void *raster, void *device, int flags)
         cover_report(256);
         far_lod_report();
         sl_report();
+        { void p4_wd_report(void), p4_col_report(void); p4_wd_report(); p4_col_report(); }
         ds_report();
         flat_report();
         gu_census_report();
@@ -2228,13 +2258,14 @@ static unsigned *draw_address(unsigned *at, int prim, unsigned type, int count, 
     return at;
 }
 
+static const unsigned *draw_static_template;
 static void gu_draw(int prim, int vtype, int count, const void *indices, const void *vertices)
 {
     int more = draw_strip_n > 1 && indices ? draw_strip_n - 1 : 0; /* strips: count is every strip's indices */
     static unsigned caller_vtype; /* the format the callers set (a second pass sends 0), not the flat one sent for it */
     if (vtype)
         caller_vtype = vtype;
-    if (p4_flat_all && indices && !sl_recording && !sk_recording && !flat_hold) {
+    if (p4_flat_all && indices && !draw_static_template && !sl_recording && !sk_recording && !flat_hold) {
         unsigned vt = caller_vtype;
         int total = count;
         if (!(vt & GU_VERTICES_BITS) && (vt & GU_INDEX_BITS)) {
@@ -2268,6 +2299,16 @@ static void gu_draw(int prim, int vtype, int count, const void *indices, const v
         work_vtype = vtype;
     if (ge_work_on)
         work_draw(work_vtype, count, indices);
+    if (draw_static_template) {
+        /* Both GS alpha passes execute the same validated, relocated geometry template. */
+        unsigned at = (unsigned)draw_static_template;
+        *gu_list->current++ = 0x10000000u | (at >> 8 & 0xf0000);
+        *gu_list->current++ = 0x0a000000u | (at & 0xffffff);
+        strip_tail = 0;
+        if (++draws_since_stall >= (unsigned)p4_draw_batch && !gu_object_stack_depth)
+            stall_flush();
+        return;
+    }
     if (more)
         count = draw_strip_lens[0];
     if (!gu_mesh_mode || p4_draw_batch <= 1) {
@@ -2350,7 +2391,7 @@ void __wrap_sceGuDrawArray(int prim, int vtype, int count, const void *indices, 
    then the stall moves past it and the wait until the GE reaches it is that piece's GE time. Serial: slow frames. */
 int p4_exp_ge_time = 0;
 extern int gu_object_stack_depth;
-enum { GT_ATOMIC, GT_2D, GT_PTANK, GT_CLEAR, GT_COUNT };
+enum { GT_ATOMIC, GT_2D, GT_PTANK, GT_CLEAR, GT_RING, GT_TINT, GT_UIQ, GT_CLOUD, GT_COUNT }; /* b482: 2D split by path */
 static unsigned ge_time_us[GT_COUNT];
 /* b206: the timer's own cost: once a frame an empty piece (the marker alone) is timed, and the timed pieces counted,
    so a geometry's ge_us can be read net of pieces x empty (b201: 9f01a50, 32 vertices, ~80 pieces a frame, 2.5 ms) */
@@ -2577,6 +2618,7 @@ int func_003fc5f0(unsigned char **pixels, Raster *r, int how)
         return 0;
     }
     raster_changed(r);
+    clut32_locked(r); /* b486 */
     r->cpPixels = r->originalPixels;
     *pixels = r->cpPixels;
     if (!r->cpPixels)
@@ -3112,8 +3154,10 @@ static void cover_report(unsigned frames)
         best->frames = 0;
     }
     if (ge_time_frames)
-        p4_log("ge time per frame us: atomics %u 2d %u ptank %u clear %u (%u frames)\n", ge_time_us[GT_ATOMIC] / ge_time_frames, ge_time_us[GT_2D] / ge_time_frames,
-               ge_time_us[GT_PTANK] / ge_time_frames, ge_time_us[GT_CLEAR] / ge_time_frames, ge_time_frames);
+        p4_log("ge time per frame us: atomics %u 2d %u ptank %u clear %u ring %u tint %u uiquad %u cloud %u (%u frames)\n",
+               ge_time_us[GT_ATOMIC] / ge_time_frames, ge_time_us[GT_2D] / ge_time_frames, ge_time_us[GT_PTANK] / ge_time_frames,
+               ge_time_us[GT_CLEAR] / ge_time_frames, ge_time_us[GT_RING] / ge_time_frames, ge_time_us[GT_TINT] / ge_time_frames,
+               ge_time_us[GT_UIQ] / ge_time_frames, ge_time_us[GT_CLOUD] / ge_time_frames, ge_time_frames);
     if (ge_time_frames && ge_empty_n)
         p4_log("ge time empty piece %u us, %u pieces per frame: ~%u us a frame is the timer\n", ge_empty_us / ge_empty_n,
                ge_pieces / ge_time_frames, ge_empty_us / ge_empty_n * (ge_pieces / ge_time_frames));
@@ -3132,6 +3176,9 @@ static void cover_report(unsigned frames)
 #include "shadow_capsules.h"
 #include "far_lod.h"
 static void ib_boundary(void) { ib_before(0); }
+static int wd_watch; /* b453 world_direct.h: the body's list call is being learned */
+static void wd_note(const void *e, const unsigned *list, unsigned draws, const Matrix *model, const void *normals, int memo);
+static void wd_note_gate(const void *e, const Matrix *model, const void *normals);
 #include "static_list.h"
 
 /* AtomicDefaultRenderCallBack */
@@ -3556,6 +3603,9 @@ static void *atomic_draw(void *atomic, Geometry *g, char *frame, const Matrix *m
     churn_atomic_g = 0, churn_atomic_skinned = 0;
     return atomic;
 }
+
+#include "world_direct.h" /* b453: the field passes without RenderWare's walk */
+#include "collision.h" /* b466: the field's sphere sweeps skip atomics they cannot reach */
 
 /* RxPipelineExecute: the game's own atomic callbacks, such as toon outlines, come here after setting up their state. */
 enum { OBJECT_ATOMIC = 1 };

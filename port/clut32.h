@@ -15,7 +15,7 @@ int p4_clut32 = 1, p4_clut32_build = 1, p4_clut32_min = 0;
 #include "paths.h"
 int p4_clut_pack = 0;
 enum { CLUT32_SLOTS = 256, CLUT32_PROBE = 8 };
-typedef struct { const Raster *of; const unsigned char *pixels; Raster copy; } Clut32;
+typedef struct { const Raster *of; const unsigned char *pixels; Raster copy; unsigned short pw, ph; } Clut32; /* pw, ph: b491 prescaled image size */
 static Clut32 *clut32_slots; /* heap: .bss must end below the data image */
 static unsigned clut32_binds, clut32_made, clut32_full, clut32_stale, clut32_ms;
 
@@ -112,7 +112,8 @@ static void clut32_free_copy(Clut32 *s)
         return;
     unsigned char *p = s->copy.originalPixels;
     p4a_free(swizzle_head(p) ? p - SWIZZLE_HEAD : p);
-    p4a_free(s->copy.palette);
+    if (s->copy.palette != s->of->palette) /* b484: a swizzled copy shares the raster's own palette */
+        p4a_free(s->copy.palette);
     memset(s, 0, sizeof *s);
 }
 
@@ -143,6 +144,22 @@ static void clut32_written(const unsigned char *at, unsigned bytes)
         unsigned size = (unsigned)s->of->stride * s->of->height * 2 + 64; /* level 0 and its mips, rounded up */
         if (at < p + size && at + bytes > p - 64) {
             const Raster *r = s->of;
+            const unsigned char *pixels = s->pixels;
+            clut32_free_copy(s);
+            s->of = r, s->pixels = pixels; /* refusal: copy stays 0 */
+            clut32_stale++;
+        }
+    }
+}
+
+/* b486: the game locks the raster's texels (RwRasterLock): a CLUT8 or swizzled copy of it is stale from now on, and
+   a rows raster keeps its pixel pointer through a lock, so the copy would never be noticed as old (b484: the battle's
+   HP gauges, redrawn into their texture, stayed empty). The raster keeps its original for good, as after a write. */
+static void clut32_locked(const Raster *r)
+{
+    for (int i = 0; clut32_slots && i < CLUT32_SLOTS; i++) {
+        Clut32 *s = &clut32_slots[i];
+        if (s->of == r && s->copy.originalPixels) {
             const unsigned char *pixels = s->pixels;
             clut32_free_copy(s);
             s->of = r, s->pixels = pixels; /* refusal: copy stays 0 */
@@ -296,4 +313,213 @@ static Raster *clut32_find(Raster *r)
     if (!free_slot->of) /* no memory: remember the refusal */
         free_slot->of = r, free_slot->pixels = r->originalPixels;
     return clut32_find(r);
+}
+
+/* b484 p4_swz_copy: swizzled copies of indexed (4/8-bit) textures the game writes itself and so never swizzles (TMX
+   images: the title's 512x512 and 256x256 CLUT8 layers, sampled as rows: b483 title GE ~55 ms a frame, its 2D draws
+   9.5 ms for 0.67 of a screen from one 512x512 image). The copy keeps the raster's texels in the GE's block order
+   (and mip levels, as swizzle_raster makes them) and the raster's own palette; it is made at the first bind and kept
+   in the clut32 slots, so a texel write into the raster (tmxDmaCopy, a lock) drops it for good, as with clut32.
+   0: the rows, as before. */
+int p4_swz_copy = 1;
+static unsigned swz_made, swz_binds;
+/* b491 p4_swz_prescale: an 8-bit copy is resampled once to the size the PSP shows it at: the game draws 2D for the PS2's
+   640x448, the PSP screen is 480x272, so an image drawn 1:1 there lands at 0.75 x 0.607 of its texels here. The copy
+   holds the image at that size (each texel the area average of the texels it covers, mapped back to the nearest entry
+   of the raster's own palette), top-left in the same power-of-two buffer, the last row and column repeated past it.
+   2D draws map their UVs onto that part (texture_w/h), so the GE reads about 1:1: sharp like level 0 (b490's levels
+   blurred the battle menu), and about half the texels (the title stays fast without levels). 0: as b490. */
+int p4_swz_prescale = 1;
+/* b492: only images at least this big both ways are prescaled (the title's full-screen layers); text and menu sheets
+   lost their letters' strokes to the area average (b491 save/menu/command lists), so smaller ones keep level 0 */
+int p4_swz_prescale_min = 256;
+static unsigned swz_prescaled;
+/* b493: the nearest palette entry of an RGBA colour, memoised per palette at 6 bits a channel (direct-mapped, tagged:
+   b491's 3-bit memo moved colours by up to 1/8 of the range) */
+enum { SWZ_NEAR = 8192 };
+static unsigned swz_near_tag[SWZ_NEAR];
+static unsigned char swz_near_val[SWZ_NEAR];
+static const unsigned char *swz_near_pal;
+static int swz_nearest(const unsigned *pal, int n, unsigned r, unsigned g, unsigned b, unsigned a)
+{
+    unsigned key = (r >> 2) << 18 | (g >> 2) << 12 | (b >> 2) << 6 | (a >> 2), slot = (key * 2654435761u) >> 19;
+    if (swz_near_tag[slot] == key + 1)
+        return swz_near_val[slot];
+    int best = 0;
+    unsigned best_d = ~0u;
+    for (int i = 0; i < n; i++) {
+        unsigned c = pal[i];
+        int ca = c >> 24, dr = (int)(c & 255) - (int)r, dg = (int)(c >> 8 & 255) - (int)g, db = (int)(c >> 16 & 255) - (int)b,
+            da = ca - (int)a;
+        /* colour matters as much as it shows: weighted by the brighter alpha; alpha itself counts double */
+        int vis = (ca > (int)a ? ca : (int)a) + 8;
+        unsigned d = (unsigned)((2 * dr * dr + 4 * dg * dg + db * db) * vis >> 8) + 6u * da * da;
+        if (d < best_d)
+            best_d = d, best = i;
+    }
+    swz_near_tag[slot] = key + 1;
+    swz_near_val[slot] = (unsigned char)best;
+    return best;
+}
+static float swz_lanczos2(float t)
+{
+    if (t < 0) t = -t;
+    if (t < 1e-4f) return 1;
+    if (t >= 2) return 0;
+    float pt = 3.14159265f * t;
+    return 2 * sinf(pt) * sinf(pt * 0.5f) / (pt * pt);
+}
+enum { SWZ_TAPS = 8, SWZ_RING = 16 };
+/* taps of output o (of n_out) over n_in source texels: Lanczos-2 widened by the downscale, normalised */
+static void swz_taps(int n_in, int n_out, int o, int *first, float *w)
+{
+    float scale = (float)n_out / n_in, center = (o + 0.5f) / scale - 0.5f, radius = 2 / scale;
+    int f = (int)floorf(center - radius + 1);
+    if (f < 0) f = 0;
+    if (f > n_in - SWZ_TAPS) f = n_in - SWZ_TAPS > 0 ? n_in - SWZ_TAPS : 0;
+    float sum = 0;
+    for (int k = 0; k < SWZ_TAPS; k++)
+        w[k] = f + k < n_in ? swz_lanczos2((f + k - center) * scale) : 0, sum += w[k];
+    for (int k = 0; k < SWZ_TAPS; k++)
+        w[k] /= sum;
+    *first = f;
+}
+/* b493 rows (r's stride) into out (same stride): the image at pw x ph by a separable Lanczos-2 on premultiplied RGBA
+   (thin strokes keep their contrast, edges get no dark fringe), then edge-repeated. b491 used an area average: text
+   strokes thinner than a texel turned to faint grey, the save screen and menus read blurry. */
+static void swz_prescale(const Raster *r, const unsigned char *rows, unsigned char *out, int pw, int ph)
+{
+    const unsigned *pal = (const unsigned *)r->palette;
+    int W = r->width, H = r->height, stride = r->stride;
+    if (swz_near_pal != r->palette) { /* the memo is per palette */
+        memset(swz_near_tag, 0, sizeof swz_near_tag);
+        swz_near_pal = r->palette;
+    }
+    static float pre[256][4]; /* premultiplied palette */
+    for (int i = 0; i < 256; i++) {
+        unsigned c = pal[i];
+        float al = (c >> 24) / 255.0f;
+        pre[i][0] = (c & 255) * al, pre[i][1] = (c >> 8 & 255) * al, pre[i][2] = (c >> 16 & 255) * al, pre[i][3] = c >> 24;
+    }
+    float *ring = p4a_memalign(16, SWZ_RING * pw * 4 * sizeof(float));
+    int *xf = p4a_memalign(16, pw * sizeof(int));
+    float *xw = p4a_memalign(16, pw * SWZ_TAPS * sizeof(float));
+    if (!ring || !xf || !xw) { /* no memory: nearest texel */
+        for (int y = 0; y < ph; y++)
+            for (int x = 0; x < pw; x++)
+                out[y * stride + x] = rows[(y * H / ph) * stride + x * W / pw];
+        goto edges;
+    }
+    int ring_row[SWZ_RING];
+    for (int i = 0; i < SWZ_RING; i++) ring_row[i] = -1;
+    for (int x = 0; x < pw; x++)
+        swz_taps(W, pw, x, &xf[x], &xw[x * SWZ_TAPS]);
+    for (int y = 0; y < ph; y++) {
+        int yf;
+        float yw[SWZ_TAPS], acc[4];
+        swz_taps(H, ph, y, &yf, yw);
+        for (int k = 0; k < SWZ_TAPS; k++) { /* horizontal pass of the source rows this output row needs */
+            int sy = yf + k;
+            if (sy >= H || ring_row[sy % SWZ_RING] == sy) continue;
+            float *h = ring + (sy % SWZ_RING) * pw * 4;
+            const unsigned char *src = rows + sy * stride;
+            for (int x = 0; x < pw; x++) {
+                const float *w = &xw[x * SWZ_TAPS];
+                float a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+                for (int t = 0; t < SWZ_TAPS; t++) {
+                    if (xf[x] + t >= W) break;
+                    const float *c = pre[src[xf[x] + t]];
+                    a0 += w[t] * c[0], a1 += w[t] * c[1], a2 += w[t] * c[2], a3 += w[t] * c[3];
+                }
+                h[x * 4] = a0, h[x * 4 + 1] = a1, h[x * 4 + 2] = a2, h[x * 4 + 3] = a3;
+            }
+            ring_row[sy % SWZ_RING] = sy;
+        }
+        for (int x = 0; x < pw; x++) {
+            acc[0] = acc[1] = acc[2] = acc[3] = 0;
+            for (int k = 0; k < SWZ_TAPS && yf + k < H; k++) {
+                const float *h = ring + ((yf + k) % SWZ_RING) * pw * 4 + x * 4;
+                acc[0] += yw[k] * h[0], acc[1] += yw[k] * h[1], acc[2] += yw[k] * h[2], acc[3] += yw[k] * h[3];
+            }
+            float al = acc[3] < 0 ? 0 : acc[3] > 255 ? 255 : acc[3];
+            unsigned c[3];
+            for (int i = 0; i < 3; i++) {
+                float v = al > 0.5f ? acc[i] * 255 / al : 0;
+                c[i] = v < 0 ? 0 : v > 255 ? 255 : (unsigned)(v + 0.5f);
+            }
+            out[y * stride + x] = (unsigned char)swz_nearest(pal, 256, c[0], c[1], c[2], (unsigned)(al + 0.5f));
+        }
+    }
+edges:
+    if (ring) p4a_free(ring);
+    if (xf) p4a_free(xf);
+    if (xw) p4a_free(xw);
+    for (int y = 0; y < ph; y++)
+        for (int x = pw; x < W; x++)
+            out[y * stride + x] = out[y * stride + pw - 1];
+    for (int y = ph; y < H; y++)
+        memcpy(out + y * stride, out + (ph - 1) * stride, stride);
+}
+static Raster *swz_find(Raster *r)
+{
+    if (r->width < 64 || r->height < 8 || r->width > 512 || r->height > 512 || !r->originalPixels || swizzle_head(r->originalPixels))
+        return r;
+    if (!clut32_slots && !(clut32_slots = p4a_calloc(CLUT32_SLOTS, sizeof *clut32_slots)))
+        return r;
+    Clut32 *free_slot = 0;
+    unsigned home = ((unsigned)r >> 4) * 2654435761u >> 24;
+    for (int k = 0; k < CLUT32_PROBE; k++) {
+        Clut32 *s = &clut32_slots[(home + k) & (CLUT32_SLOTS - 1)];
+        if (s->of == r) {
+            if (s->pixels != r->originalPixels || !s->copy.originalPixels || s->copy.depth != r->depth)
+                return r;
+            swz_binds++;
+            return &s->copy;
+        }
+        if (!s->of && !free_slot)
+            free_slot = s;
+    }
+    if (!free_slot)
+        return r;
+    unsigned bytes = r->stride * r->height;
+    unsigned char *indices = p4a_memalign(64, bytes);
+    free_slot->of = r, free_slot->pixels = r->originalPixels;
+    if (!indices)
+        return r; /* refusal remembered: copy stays 0 */
+    int pw = 0, ph = 0;
+    if (p4_swz_prescale && r->depth == 8 && r->palette && r->width >= p4_swz_prescale_min && r->height >= p4_swz_prescale_min) {
+        pw = (r->width * 3 + 3) / 4, ph = (r->height * 17 + 27) / 28; /* 480/640, 272/448 */
+        swz_prescale(r, r->originalPixels, indices, pw, ph);
+        swz_prescaled++;
+    } else
+        memcpy(indices, r->originalPixels, bytes);
+    free_slot->pw = pw, free_slot->ph = ph;
+    Raster copy = *r;
+    copy.originalPixels = copy.cpPixels = indices;
+    /* b489: no mip levels. A 2D gauge (the battle HP bar) is drawn narrower as HP falls: the GE took a smaller level,
+       and a point-decimated level of a thin bar held only empty texels (the bar read as 0). Level 0 is what the rows
+       draw. */
+    /* b490: levels again for big images (the title's 128..512 layers: 30 FPS with levels, ~20 without), each level
+       keeping its blocks' most opaque texel; small UI images (gauges, icons) stay at level 0 */
+    int big = 0; /* b492: no levels at all; big layers are prescaled instead (b490's levels blurred the menus) */
+    {
+        unsigned soft = 0, n = r->width * r->height;
+        if (r->palette && r->depth == 8)
+            for (unsigned i = 0; i < n; i++) {
+                unsigned a = ((const unsigned *)r->palette)[r->originalPixels[(i / r->width) * r->stride + i % r->width]] >> 24;
+                soft += a > 0 && a < 0x70;
+            }
+        p4_log("swz new %p %dx%d d%d prescaled %dx%d soft %u%%\n", (void *)r, r->width, r->height, r->depth, pw, ph,
+               n ? soft * 100 / n : 0);
+    }
+    swizzle_to_arena = 1, swizzle_mips_alpha = big, swizzle_mips_off = !big;
+    swizzle_raster(&copy);
+    swizzle_to_arena = 0, swizzle_mips_alpha = 0, swizzle_mips_off = 0;
+    if (!swizzle_head(copy.originalPixels)) { /* no memory to swizzle: keep the rows */
+        p4a_free(copy.originalPixels);
+        return r;
+    }
+    free_slot->copy = copy;
+    swz_made++;
+    return &free_slot->copy;
 }

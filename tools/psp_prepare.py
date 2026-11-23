@@ -261,7 +261,7 @@ def prepare(iso, output, bundle=BUNDLE, workers=4, *, pspdev=None, build_cache=N
                           strings_sha256=hashes['p4str.bin'])
             eboot = built / 'EBOOT.PBP'
             data, strings = (built / 'p4data.bin').read_bytes(), (built / 'p4str.bin').read_bytes()
-            extras = {name: (built / name, hashes[name]) for name in ('p4strips.bin', 'p4clut.bin') if name in hashes}
+            extras = {name: (built / name, hashes[name]) for name in ('p4strips.bin', 'p4clut.bin', 'p4static.bin') if name in hashes}
         identity = {'iso_sha256': iso_digest, 'eboot_sha256': recipe['eboot_sha256']}
         if source_build:
             identity['source_config_sha256'] = source_identity

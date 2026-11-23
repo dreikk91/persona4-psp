@@ -56,7 +56,7 @@ def main():
     update.mkdir(parents=True, exist_ok=True)
     planned = {}
     artifacts = ['EBOOT.PBP', 'p4data.bin', 'p4str.bin']
-    artifacts.extend(name for name in ('p4strips.bin', 'p4clut.bin') if name in manifest['artifact_sha256'])
+    artifacts.extend(name for name in ('p4strips.bin', 'p4clut.bin', 'p4static.bin') if name in manifest['artifact_sha256'])
     for name in artifacts:
         expected = manifest['artifact_sha256'][name]
         if sha256(out / name) != expected:

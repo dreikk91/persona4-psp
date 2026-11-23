@@ -100,19 +100,23 @@ def parse_geometry(d, o, size):
     version = ((stamp >> 14) & 0x3ff00) + 0x30000 | ((stamp >> 16) & 0x3f) if stamp & 0xffff0000 else stamp << 8
     if version < 0x34000:
         p += 12  # surface properties
+    prelit = d[p:p + nv * 4] if fmt & 8 else b''
     if fmt & 8:
         p += nv * 4
     sets = (fmt >> 16) & 0xff or (2 if fmt & 0x80 else 1 if fmt & 4 else 0)
+    uv = d[p:p + nv * 8] if sets else b''
     p += sets * nv * 8 + ntri * 8 + 16
     has_verts, has_normals = struct.unpack_from('<II', d, p)
     p += 8
     if has_verts > 1 or has_normals > 1:
         return None
     verts = d[p:p + nv * 12 * has_verts]
+    normals = d[p + nv * 12 * has_verts:p + nv * 12 * (has_verts + has_normals)]
     p += nv * 12 * (has_verts + has_normals)
     if p != so + ss:
         return None
-    g = dict(nverts=nv, verts=verts, meshes=None, strip=0, skin=None)
+    g = dict(nverts=nv, verts=verts, normals=normals, uv=uv, prelit=prelit,
+             flags=fmt, meshes=None, strip=0, skin=None, offset=o, size=size)
     for kind, co, cs, _ in chunks(d, so + ss, end):
         if kind != 3:  # extension
             continue
@@ -121,11 +125,14 @@ def parse_geometry(d, o, size):
                 flags, nm, _ = struct.unpack_from('<III', d, eo)
                 q = eo + 12
                 meshes = []
+                materials = []
                 for _ in range(nm):
-                    ni, _ = struct.unpack_from('<II', d, q)
+                    ni, mat = struct.unpack_from('<II', d, q)
                     meshes.append(struct.unpack_from('<%dI' % ni, d, q + 8))
+                    materials.append(mat)
                     q += 8 + ni * 4
                 g['meshes'], g['strip'] = meshes, flags & 0xf
+                g['mesh_materials'] = materials
             elif ek == 0x116:  # skin
                 bones, used, maxw = d[eo], d[eo + 1], d[eo + 2]
                 q = eo + 4 + used

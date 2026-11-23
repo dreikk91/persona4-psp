@@ -130,7 +130,7 @@ int p4_cloud_draw(const Vertex2D *mask, const Vertex2D *noise, Raster *raster, u
     for (int i = 0; i < 4; i++) put_vertex(v + i, mask + i);
     sceGuDrawArray(GU_TRIANGLE_STRIP, GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 4, 0, v);
     cloud_draws++;
-    ge_time_end(timed, GT_2D); prof_end(PROF_2D);
+    ge_time_end(timed, GT_CLOUD); prof_end(PROF_2D);
     return 1;
 }
 

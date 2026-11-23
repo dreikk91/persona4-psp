@@ -1,5 +1,37 @@
 # Changelog
 
+## b493 pre-release (2026-11-23)
+
+Port and utility changes since b450. "PSP" figures come from profiling builds at 333 MHz on the named scene; the b493 XMB executable produced by the utility has not itself been run on a PSP in this release session.
+
+### Changes retained (on by default unless noted)
+
+| Builds | Change | Evidence / result |
+|---|---|---|
+| b451 | Offline static geometry pack (`p4static.bin`): integer s8/s16 vertices, meshoptimizer simplification and strips, conservative bounds, relocatable GE templates | The utility generates and installs the pack (about 54 MB on the memory card). Runtime consumer **off** (`p4_static_pack=0`) pending PSP validation. Details: [offline static geometry](docs/offline_static_b451.md). |
+| b453-b461 | Field passes draw prepared-list atomics from flat arrays instead of walking RenderWare (`p4_world_direct`) | PSP: Heaven 41.0 -> 37.9 ms CPU, Junes West Entrance 52.8 -> 44.4 ms; RW callbacks 210 -> 47 a frame; pictures unchanged, check mode 0 list diffs. |
+| b462-b463 | Gated lists in the direct path (`p4_static_gate`, **off**); mid-game route replay for testing | Clouds gain little: their chunks all cross the guard band. |
+| b464-b472 | Field collision skips atomics a query cannot reach and limits big geometries to the triangles a world grid allows (`p4_col_cull`) | Heaven bridge run: collision 4.0 -> 0.7 M cycles a frame, CPU 62 -> 53 ms; check mode 0 diffs. |
+| b473 | Bone frames written only when read (`p4_frame_lazy`) | Heaven standing: -0.6 ms CPU; dialogue -1.5..1.7 ms; no lost frames. |
+| b481 | Direct field entries queued and emitted together in retail order (`p4_world_defer`) | Heaven: instruction misses 38.2k -> 36.6k a frame, about -0.4 ms CPU; picture unchanged. |
+| b482-b493 | Title screen and 2D: swizzled copies of indexed 2D textures the game writes itself (`p4_swz_copy`); layers of 256x256 and larger prescaled to the PSP size with Lanczos-2, smaller images kept at level 0 | Title (PRESS ANY BUTTON): 10 FPS -> ~30 FPS (GE wait 55-60 -> ~6 ms, b490 measurement). Battle HP gauges and text kept sharp. |
+| b485 | Movie and audio restart run in watched threads; 4 s without progress skips the movie instead of freezing | Mitigates Media Engine RPC hangs ([notes](docs/audio_video_hang.md)); title attract loop of 7 movies without a stall. Not proof that every hang is gone. |
+
+### Fixes
+
+- b486, b489: battle HP gauges read empty: textures the game locks keep their original, and small 2D copies have no mip levels.
+- b488: freeze after a battle or a field change (bus error in the world-direct report reading freed geometries).
+- b491-b492: blurred menu and save-screen text from prescaling small 8-bit images.
+
+### Experiments left off
+
+- b480 native effect rotation helpers (`p4_eff_rotate`): exact over ~38k calls, no gain.
+- b474-b479 profiling found Heaven's orbit particle emitter costs ~0.65 M cycles a frame; not yet optimised.
+
+### Validation and limitations
+
+See [b493 validation](docs/build_validation_b493.md). Title-screen and battle-gauge pictures with the final b493 copies, movie hangs, heap fragmentation after scene changes and slower heavy scenes still need PSP checks. No complete playthrough or stable whole-game 30 FPS is claimed.
+
 ## b450 pre-release (2026-11-21)
 
 Source-build utility and port changes since b388. Hardware results below come from the named diagnostic builds at 333 MHz; the b450 XMB executable needs its own gameplay validation. A smaller buffer or faster CPU section does not imply an FPS gain.

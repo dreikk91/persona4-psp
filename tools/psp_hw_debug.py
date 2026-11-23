@@ -28,7 +28,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=ROOT / "build" / "psplink_diag")
     parser.add_argument("--release", action="store_true", help="Build an XMB release without hardware profiling")
-    parser.add_argument("--asset-packs", type=Path, help="Directory containing p4strips.bin and p4clut.bin")
+    parser.add_argument("--asset-packs", type=Path, help="Directory containing p4strips.bin, p4clut.bin and optional p4static.bin")
     args = parser.parse_args()
     if args.asset_packs and not all((args.asset_packs / name).is_file() for name in ("p4strips.bin", "p4clut.bin")):
         parser.error("--asset-packs requires both p4strips.bin and p4clut.bin")
@@ -83,7 +83,7 @@ def main():
     port = [out / f"{name}.o" for name in (*PORT, *PORT_ASM)]
     wraps = ["sdkSpriteRequestLoad", "sceGuGetMemory", "sceGuDrawArray", "sceGeListUpdateStallAddr", "func_00397c40",
              "malloc", "calloc", "realloc", "memalign", "free",  # b166 memory census (main.c), as psp_link
-             "sceKernelSleepThread"]  # b416 ee.c: every sleep in the watchdog's ring
+             "sceKernelSleepThread", "sceKernelSleepThreadCB"]  # b416 ee.c: every sleep in the watchdog's ring
     if not args.release:
         wraps += ["mdlQueueModelForDraw", "mdlComputeIndexedAttachMatrix", "qsort",
                   "mdlEffectFlushWithTable", "mdlEffectAdvanceAndFlushWithTable",
@@ -91,7 +91,12 @@ def main():
                   "FldResource_QueueDrawCallbacksSecondary", "PrimAllocQueueNode", "PrimAppendNode",
                   "func_003d5bc0", "func_003d5e40", "func_003d5e90", "func_003d5840", "func_003e9680",
                   "p4r_003ed7e0", "func_003e9cb0", "mdlEffectListInvokeEach",  # b263 frame sync, RwFrameTransform
-                  "func_003e9700", "p4r_003e9700"]  # b358 RwFrameGetLTM: bone frame census (hanim.h)
+                  "func_003e9700", "p4r_003e9700",
+                  "func_00394d70", "func_00394e70", "FldFrame_RaycastFieldWorlds", "FldFrame_RaycastSelectedWorld",  # b464 collision
+                  "mdlEffectListSetUniformScale", "mdlEffectListReleaseHandles", "mdlEffectListRefreshHandles",
+                  "mdlSetWrapperValue", "mdlClearWrapperHandle", "mdlRefreshSecondaryEffect", "mdlHasActiveMode",  # b475
+                  "mdlEffectAdvanceEmitter", "ParticleUpdateScaled", "mdlEffectCommitChild", "mdlEffectUpdateChildData",  # b477
+                  "mdlEffectSampleKeyState", "mdlEffectUpdateParticleTrail"]  # b479  # b358 RwFrameGetLTM: bone frame census (hanim.h)
         wraps += [f"sceGu{name}" for name in (  # b431 gu census (rwsky.c gu_census_report)
             "Enable", "Disable", "StencilFunc", "StencilOp", "AlphaFunc", "DepthMask", "DepthFunc", "PixelMask",
             "FrontFace", "BlendFunc", "TexFunc", "TexFilter", "TexWrap", "TexMode", "TexImage", "TexFlush", "TexSync",
@@ -120,6 +125,8 @@ def main():
     destination.mkdir(parents=True, exist_ok=True)
     artifacts = ["p4.elf", "p4.prx", "EBOOT.PBP", data_name, "p4str.bin"]
     packs = [args.asset_packs / name for name in ("p4strips.bin", "p4clut.bin")] if args.asset_packs else [ROOT / "build/psp_dist/PSP/GAME/P4/p4strips.bin"]
+    asset_root = args.asset_packs or ROOT / "build/psp_dist/PSP/GAME/P4"
+    packs.append(asset_root / "p4static.bin")
     for pack in packs:
         if pack.is_file():
             shutil.copyfile(pack, out / pack.name)

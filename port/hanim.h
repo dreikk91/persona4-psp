@@ -1353,7 +1353,7 @@ static float sync_max_diff;
    for it, before the objects on it are synced, and before a child frame that is not a bone multiplies its LTM. The
    three recursive syncs skip the multiply for a lazy frame. Readers of frame memory that go around all of these are
    not covered: "lost" counts a lazy frame whose hierarchy was not found (its data stays old). */
-int p4_frame_lazy = 0;
+int p4_frame_lazy = 1; /* b473: on (PSP Heaven standing -0.6 ms, kmat 0.61 -> 0.41 M; b360/b366 dialogue -1.5..1.7 ms; lost 0; route shots fine) */
 enum { FRAME_LAZY = 0x40, LAZY_HIER = 64 };
 static struct { const unsigned *h; const unsigned char *root; unsigned tick; } flz_h[LAZY_HIER];
 static unsigned flz_nodes, flz_written[4], flz_lost, flz_evicted; /* written: 0 GetLTM, 1 objects, 2 child, 3 evicted */
