@@ -1,5 +1,14 @@
 # Changelog
 
+## b494 pre-release (2026-11-24)
+
+Fixes on top of b493. Not yet run on a PSP in this release session.
+
+- FPU traps are now off on every game thread, not only the PSP main thread (FCR31 is per thread). With traps on, a NaN compare on a game thread powered the PSP off with no error: the likely cause of issue #19 (hard crash during Chie's dialogue at the Junes food court, PSP-3000). PPSSPP does not emulate FPU traps, so this needs a PSP to confirm.
+
+- Texels and palettes of destroyed rasters, and dropped 2D/CLUT8 copies, are freed only after the GE finishes the list that may still read them. With double-buffered lists, freeing at once let the memory be reused under the GE (possible one-frame texture garbage). Found by the persona4-portable fork's QA (raster/CLUT lifetime). PPSSPP: title, load screen and a field load run clean; battle and PSP not checked yet.
+- Utility: the VAG audio encoder now lives in `helpers/p4meshopt.dll`; the separate `audio_vag_encoder.exe` (flagged by some antivirus software) is gone. Its output is byte-identical, so converted audio caches stay valid.
+
 ## b493 pre-release (2026-11-23)
 
 Port and utility changes since b450. "PSP" figures come from profiling builds at 333 MHz on the named scene; the b493 XMB executable produced by the utility has not itself been run on a PSP in this release session.

@@ -153,25 +153,31 @@ def catalogue(iso):
     return audit_signatures(rows, iso)
 
 
-def build_encoder(explicit=None):
-    if explicit is not None:
-        if not Path(explicit).is_file():
-            raise FileNotFoundError(explicit)
-        return Path(explicit)
-    folder = ROOT / 'build/audio_tools'
-    folder.mkdir(parents=True, exist_ok=True)
-    source = ROOT / 'tools/audio_vag_encoder.cs'
-    target = folder / 'audio_vag_encoder.exe'
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
-    stamp = folder / 'encoder.sha256'
-    if not target.exists() or not stamp.exists() or stamp.read_text() != digest:
-        compiler = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
-        result = subprocess.run([str(compiler), '/nologo', '/optimize+', f'/out:{target}', str(source)],
-                                capture_output=True, text=True)
-        if result.returncode:
-            raise RuntimeError(result.stdout + result.stderr)
-        stamp.write_text(digest)
-    return target
+# Cache identity of the encoder output; the C port is byte-identical to the former .cs build.
+# Change it whenever the encoded bytes change.
+ENCODER_ID = '889a97fb1bd71c429ff0e2628dc5a29d85033f95879374a9f501ffd72e023d49'
+
+
+def build_encoder(library=None):
+    """Return encode(pcm_bytes, channels, loop_block) -> blocks, backed by p4meshopt.dll."""
+    import ctypes as C
+    from psp_meshopt import build_library
+    path = Path(library) if library is not None else build_library()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    lib = C.CDLL(str(path.resolve()))
+    lib.p4_vag_encode.argtypes = [C.c_char_p, C.c_size_t, C.c_int, C.c_longlong, C.c_char_p]
+    lib.p4_vag_encode.restype = C.c_int
+
+    def encode(pcm, channels, loop_block):
+        if len(pcm) % (channels * 2):
+            raise ValueError('unaligned PCM')
+        frames = len(pcm) // (channels * 2)
+        out = C.create_string_buffer((frames + 27) // 28 * channels * 16)
+        if lib.p4_vag_encode(pcm, frames, channels, loop_block, out):
+            raise ValueError('Unsupported channel count')
+        return out.raw
+    return encode
 
 
 def convert(row, iso, out, ffmpeg, encoder, vgmstream=None):
@@ -181,7 +187,7 @@ def convert(row, iso, out, ffmpeg, encoder, vgmstream=None):
     target = out / name
     stamp = out / (name + '.json')
     options = dict(version=1, signature=row['signature'], size=row['size'],
-                   encoder_sha256=hashlib.sha256((ROOT / 'tools/audio_vag_encoder.cs').read_bytes()).hexdigest())
+                   encoder_sha256=ENCODER_ID)
     if target.exists() and stamp.exists():
         saved = json.loads(stamp.read_text())
         if saved.get('options') == options and hashlib.sha256(target.read_bytes()).hexdigest() == saved['sha256']:
@@ -189,7 +195,7 @@ def convert(row, iso, out, ffmpeg, encoder, vgmstream=None):
     with tempfile.TemporaryDirectory(prefix='p4-audio-') as temporary:
         work = Path(temporary)
         source = work / ('input.ahx' if row['encoding'] == 0x11 else 'input.adx')
-        pcm, blocks = work / 'audio.pcm', work / 'audio.blocks'
+        pcm = work / 'audio.pcm'
         with iso.open('rb') as f:
             f.seek(row['offset']); source.write_bytes(f.read(row['size']))
         if row['encoding'] == 0x11:
@@ -214,11 +220,7 @@ def convert(row, iso, out, ffmpeg, encoder, vgmstream=None):
         with pcm.open('r+b') as f:
             f.truncate(samples * row['channels'] * 2)
         loop_block = row['loop_start'] // 28 if row['loop_end'] else -1
-        result = subprocess.run([str(encoder), str(pcm), str(blocks), str(row['channels']), str(loop_block)],
-                                capture_output=True, text=True)
-        if result.returncode:
-            raise RuntimeError(result.stdout + result.stderr)
-        payload = blocks.read_bytes()
+        payload = encoder(pcm.read_bytes(), row['channels'], loop_block)
         count = (samples + 27) // 28
         if len(payload) != count * row['channels'] * 16:
             raise ValueError('Invalid encoded block count')

@@ -20,6 +20,9 @@ static int trampoline(SceSize size, void *arg)
 {
     SceUID self = sceKernelGetThreadId();
     __asm__ volatile("move $gp, %0" : : "r"(P4_GP)); /* a new thread may start with the module's $gp */
+    /* b494: FCR31 is per thread: main() turned the FPU traps off for itself only, so the game's own threads kept the
+       hardware default and a NaN compare there powered the PSP off (issue 19, Junes food court dialogue) */
+    __asm__ volatile("ctc1 $0, $31");
     for (int i = 0; i < MAX_THREADS; i++)
         if (threads[i].id == self)
             threads[i].func(*(void **)arg);

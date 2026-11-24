@@ -156,7 +156,7 @@ def main():
                 '--exclude-module', 'imageio_ffmpeg', '--exclude-module', 'numpy',
                 '--hidden-import', 'PIL.Image', '--hidden-import', 'ctypes',
                 '--hidden-import', 'tkinter', '--hidden-import', 'tkinter.filedialog', '--hidden-import', 'tkinter.messagebox',
-                '--hidden-import', 'tkinter.ttk', '--add-data', str(ROOT / 'tools/audio_vag_encoder.cs') + ';tools',
+                '--hidden-import', 'tkinter.ttk',
                 '--hidden-import', 'runpy', '--hidden-import', 'concurrent.futures.thread',
                 str(ROOT / 'tools/psp_prepare.py')], check=True)
             print(f'Longest freeze path: {check_path_lengths(temp, 0)} characters', flush=True)
@@ -164,7 +164,7 @@ def main():
     else:
         # Developer package: public packages should use --freeze.
         for name in ('psp_prepare.py', 'psp_audio.py', 'psp_video.py', 'psp_disc.py', 'psp_data_census.py',
-                     'psp_build.py', 'extract_elf.py', 'audio_vag_encoder.cs'):
+                     'psp_build.py', 'extract_elf.py', 'psp_meshopt.py'):
             target = out / 'tools' / name
             target.parent.mkdir(exist_ok=True); shutil.copyfile(ROOT / 'tools' / name, target)
     if args.legacy_prebuilt:
@@ -186,8 +186,6 @@ def main():
     shutil.copyfile(meshopt_notice, out / 'licenses/meshoptimizer/LICENSE.md')
     for name in ('COPYING3', 'COPYING.RUNTIME'):
         shutil.copyfile(ROOT / 'third_party/gcc-runtime' / name, out / 'licenses/meshoptimizer' / name)
-    from psp_audio import build_encoder
-    shutil.copyfile(build_encoder(), helpers / 'audio_vag_encoder.exe')
     shutil.copytree(args.vgmstream, helpers / 'vgmstream')
     notices = out / 'licenses'
     copy_licenses(notices)

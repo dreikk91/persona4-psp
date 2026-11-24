@@ -15,11 +15,13 @@ def build_library():
     output.parent.mkdir(exist_ok=True)
     files = [source / (n + '.cpp') for n in
              ('allocator', 'indexgenerator', 'vcacheoptimizer', 'vfetchoptimizer', 'stripifier', 'simplifier')]
+    # The audio encoder rides in the same DLL: a separate tiny unsigned .exe trips antivirus heuristics.
+    files.append(ROOT / 'tools/audio_vag_encoder.c')
     compiler = shutil.which('g++')
     if not compiler:
         raise RuntimeError('Packaging needs a host g++ compiler; the frozen utility includes the compiled helper.')
     if not output.exists() or any(p.stat().st_mtime > output.stat().st_mtime for p in [*files, source / 'meshoptimizer.h']):
-        subprocess.run([compiler, '-std=c++11', '-O2', '-shared', '-static',
+        subprocess.run([compiler, '-x', 'c++', '-std=c++11', '-O2', '-shared', '-static',
                         '-DMESHOPTIMIZER_API=__declspec(dllexport)', *map(str, files), '-o', str(output)], check=True)
     return output
 

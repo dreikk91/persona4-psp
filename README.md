@@ -8,7 +8,7 @@ You must supply your own legally obtained USA disc image. Game executables, arch
 
 Use the **source-build** preparation package: extract the entire archive, run `Prepare P4.exe`, select your USA or supported USA UNDUB ISO and an output folder, then copy the resulting `P4` folder to `PSP/GAME/` on your memory card. The utility downloads the PSP compiler on the first build; no separate Python or PSPDEV setup is needed. See [the preparation guide](docs/prepare_game.md) for building the package and using it.
 
-Download **P4-PSP-b493-windows-x64.zip** from the [b493 pre-release](https://github.com/dreikk91/persona4-psp/releases/tag/b493). The utility compiles EBOOT and matching data locally from your ISO and pinned upstream sources, and builds skin/static triangle strips (`p4strips.bin`) an offline texture palette pack (`p4clut.bin`) and an offline static geometry pack (`p4static.bin`) from the same ISO. It needs Internet access for the first upstream download, or a verified offline source ZIP. Keep the build-cache folder short: the utility stops with a clear message if its paths would pass 250 characters. The older prebuilt-EBOOT b164 download was withdrawn.
+Download **P4-PSP-b494-windows-x64.zip** from the [b494 pre-release](https://github.com/dreikk91/persona4-psp/releases/tag/b494). The utility compiles EBOOT and matching data locally from your ISO and pinned upstream sources, and builds skin/static triangle strips (`p4strips.bin`) an offline texture palette pack (`p4clut.bin`) and an offline static geometry pack (`p4static.bin`) from the same ISO. It needs Internet access for the first upstream download, or a verified offline source ZIP. Keep the build-cache folder short: the utility stops with a clear message if its paths would pass 250 characters. The older prebuilt-EBOOT b164 download was withdrawn.
 
 ## Build and install
 
@@ -20,7 +20,7 @@ The b493 source package includes the rendering and memory work through b493; wha
 
 See [b493 validation](docs/build_validation_b493.md) for release checks and known test limitations. The [earlier source-build utility validation](docs/archive/source_build_validation_b164.md) covers build caching and hidden compiler processes.
 
-The current working-tree build is **b493**. The source build currently targets Windows and a Windows PSPSDK toolchain. A PSP with 64 MB RAM and firmware capable of running homebrew is required; PSP-1000 support is not established.
+The current working-tree build is **b494**. The source build currently targets Windows and a Windows PSPSDK toolchain. A PSP with 64 MB RAM and firmware capable of running homebrew is required; PSP-1000 support is not established.
 
 ## Status
 

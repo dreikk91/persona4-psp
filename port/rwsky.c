@@ -250,6 +250,35 @@ static void on_ge_finish(int arg)
         tl_frame[ge_finished & 7].gedone = tl_now();
     flip_signal(FLIP_WORK);
 }
+/* b494: memory the GE may still read (a destroyed raster's texels and palette, a dropped 2D/CLUT8 copy) is freed
+   only once the list being written is done: with p4_list_double the GE runs list N while the CPU writes N + 1, and
+   an immediate free let malloc hand the texels to someone else under the GE (fork QA03, RESONANCE01 raster/CLUT
+   lifetime). Same rule as the static lists' seq. */
+enum { GE_FREE_N = 1024 };
+static struct { void *p; unsigned seq; } ge_free_q[GE_FREE_N];
+static unsigned ge_free_head, ge_free_tail, ge_free_overflow;
+static void ge_free_poll(void)
+{
+    while (ge_free_tail != ge_free_head && (int)(ge_finished - ge_free_q[ge_free_tail & (GE_FREE_N - 1)].seq) >= 0)
+        p4a_free(ge_free_q[ge_free_tail++ & (GE_FREE_N - 1)].p);
+}
+static void ge_free_later(void *p)
+{
+    if (!p)
+        return;
+    ge_free_poll();
+    if (ge_free_head - ge_free_tail == GE_FREE_N) {
+        /* ponytail: full queue (a scene change dropping >1024 blocks in one frame) waits for the queued lists and
+           frees the oldest at once; the open list may still name it. A bigger queue if the log ever shows this. */
+        while ((int)(ge_queued - ge_finished) > 0)
+            sceKernelDelayThread(100);
+        if (ge_free_overflow++ < 4)
+            p4_log("ge_free queue full: freed before the open list is done\n");
+        p4a_free(ge_free_q[ge_free_tail++ & (GE_FREE_N - 1)].p);
+    }
+    ge_free_q[ge_free_head & (GE_FREE_N - 1)].p = p;
+    ge_free_q[ge_free_head++ & (GE_FREE_N - 1)].seq = ge_queued + 1; /* the list now being written */
+}
 static void flip_wait(unsigned bits, SceUInt timeout_us)
 {
     if (!p4_flip_event || flip_event < 0) {
@@ -1158,8 +1187,8 @@ int func_003fb830(void *out, Raster *r)
     }
     clut32_drop(r);
     if (!(r->cFlags & DONT_ALLOCATE)) {
-        free(swizzle_head(r->originalPixels) ? r->originalPixels - SWIZZLE_HEAD : r->originalPixels);
-        free(r->palette);
+        ge_free_later(swizzle_head(r->originalPixels) ? r->originalPixels - SWIZZLE_HEAD : r->originalPixels);
+        ge_free_later(r->palette); /* b494: the list in flight may still read them */
     }
     return 1;
 }
@@ -3928,6 +3957,8 @@ static unsigned caches_release_all(unsigned *lists, unsigned *proxies, unsigned 
     /* b375: the prepared static lists, far stand-ins and CLUT8 copies too (b373: 13 MB of caches, 9.5 MB of them
        never released, while a battle load was refused 545 KB) */
     *lists = sl_release_all(), *proxies = fp_release_all(), *cluts = clut32_release_all();
+    while (ge_free_tail != ge_free_head) /* b494: the GE is idle here, the deferred blocks go too (a movie needs them) */
+        p4a_free(ge_free_q[ge_free_tail++ & (GE_FREE_N - 1)].p);
     return released + *lists + *proxies + *cluts;
 }
 static void load_release_check(void)

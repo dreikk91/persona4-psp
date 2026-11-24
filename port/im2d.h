@@ -465,6 +465,7 @@ P4_HOT static void begin_frame(void)
 {
     if (!in_frame) {
         load_release_check(); /* b414 */
+        ge_free_poll(); /* b494 */
         frame_colour_pending = 1;
         gu_dirty(); /* a new list */
         in_frame = 1;

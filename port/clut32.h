@@ -111,9 +111,9 @@ static void clut32_free_copy(Clut32 *s)
     if (!s->of)
         return;
     unsigned char *p = s->copy.originalPixels;
-    p4a_free(swizzle_head(p) ? p - SWIZZLE_HEAD : p);
+    ge_free_later(swizzle_head(p) ? p - SWIZZLE_HEAD : p); /* b494: the list in flight may still read it */
     if (s->copy.palette != s->of->palette) /* b484: a swizzled copy shares the raster's own palette */
-        p4a_free(s->copy.palette);
+        ge_free_later(s->copy.palette);
     memset(s, 0, sizeof *s);
 }
 

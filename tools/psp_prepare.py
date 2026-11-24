@@ -208,7 +208,7 @@ def prepare(iso, output, bundle=BUNDLE, workers=4, *, pspdev=None, build_cache=N
     if not build_only:
         import av  # noqa: F401
         ffmpeg = bundle_ffmpeg(bundle, build_cache)
-        encoder = build_encoder(bundle / 'helpers/audio_vag_encoder.exe')
+        encoder = build_encoder(bundle / 'helpers/p4meshopt.dll')
         vgmstream = bundle / 'helpers/vgmstream/vgmstream-cli.exe'
         for helper in (Path(ffmpeg), vgmstream):
             if not helper.is_file():
@@ -526,7 +526,6 @@ def main():
         try:
             import av
             import tkinter
-            from psp_audio import ROOT as audio_root
             recipe = json.loads((args.bundle / 'prepare.json').read_text())
             source_build = recipe.get('version') == 2
             containers, data, strings = inspect_disc(args.iso, None if source_build else recipe)
@@ -542,18 +541,16 @@ def main():
             av.CodecContext.create('h264', 'r')
             window = tkinter.Tk(); window.withdraw(); window.update_idletasks(); window.destroy()
             ffmpeg = bundle_ffmpeg(args.bundle, args.build_cache)
-            for name in ('helpers/audio_vag_encoder.exe', 'helpers/vgmstream/vgmstream-cli.exe'):
+            for name in ('helpers/p4meshopt.dll', 'helpers/vgmstream/vgmstream-cli.exe'):
                 if not (args.bundle / name).is_file(): raise FileNotFoundError(name)
             if not source_build and sha256(args.bundle / 'P4/EBOOT.PBP') != recipe['eboot_sha256']:
                 raise ValueError('EBOOT hash mismatch')
-            if not (audio_root / 'tools/audio_vag_encoder.cs').is_file():
-                raise FileNotFoundError('Bundled encoder source identity is missing')
             report.update(ok=True, build=recipe['build'], av=av.__version__, tk=tkinter.TkVersion,
                           mode=recipe.get('mode', 'prebuilt'),
                           data_sha256=hashlib.sha256(data).hexdigest() if data is not None else None,
                           containers=[r[0] for r in containers])
             if args.probe:
-                from psp_audio import catalogue, convert as convert_audio
+                from psp_audio import build_encoder, catalogue, convert as convert_audio
                 from psp_video import movies, convert as convert_video
                 with (args.output / 'probe.log').open('w', encoding='utf-8') as log, contextlib.redirect_stdout(log):
                     rows = catalogue(args.iso)
@@ -561,7 +558,7 @@ def main():
                     selected = [min((r for r in rows if r['encoding'] == encoding), key=lambda r: r['size']) for encoding in (3, 0x11)]
                     for row in selected:
                         convert_audio(row, args.iso, audio, ffmpeg,
-                                      args.bundle / 'helpers/audio_vag_encoder.exe', args.bundle / 'helpers/vgmstream/vgmstream-cli.exe')
+                                      build_encoder(args.bundle / 'helpers/p4meshopt.dll'), args.bundle / 'helpers/vgmstream/vgmstream-cli.exe')
                     movie = min(movies(args.iso), key=lambda r: r[2])
                     convert_video(args.iso, movie, args.output / 'video', str(ffmpeg), seconds=1, crop_black=False)
                     report['probe_audio'] = [r['path'] for r in selected]
