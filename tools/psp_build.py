@@ -265,7 +265,7 @@ def verify_upstream(archive, wanted):
 def payload_files(root):
     root = Path(root)
     files = list((root / 'port').glob('*.c')) + list((root / 'port').glob('*.h'))
-    files += list((root / 'port').glob('*.S'))
+    files += list((root / 'port').glob('*.S')) + list((root / 'port/icons').glob('*.PNG'))
     files += [root / 'tools' / (name + '.py') for name in BUILD_TOOLS]
     return sorted(files)
 
@@ -276,7 +276,7 @@ def verify_payload(bundle, config):
         raise ValueError('Source package has no source manifest.')
     for name, wanted in expected.items():
         path = safe_relative(name)
-        if path.parts[0] not in ('port', 'tools') or path.suffix not in ('.c', '.h', '.S', '.py'):
+        if path.parts[0] not in ('port', 'tools') or path.suffix not in ('.c', '.h', '.S', '.py', '.PNG'):
             raise ValueError(f'Unexpected build input: {name}')
         source = Path(bundle) / 'source' / str(path)
         if not source.is_file() or digest(source) != wanted:

@@ -1,5 +1,17 @@
 # Changelog
 
+## b495 pre-release (2026-11-25)
+
+Fixes on top of b494. Not yet run on a PSP in this release session.
+
+- When the game archives are missing (an "EBOOT only" preparation), the EBOOT now says which files are missing and how to prepare them, then exits, instead of failing later (issue #20).
+- From the persona4-portable fork: the disc archive parts are opened on first read, a truncated or malformed `p4files.idx` is refused, and a frame with nothing drawn no longer shows a stale buffer, and a log line cut at the buffer size still ends with a newline.
+- The EBOOT has its own XMB icon and background (ICON0, PIC1).
+- Utility: the preparation uses up to 16 workers (the CPU count) instead of 4.
+
+- Crash catcher (issue #21: hard power-offs with nothing in the log). On a CFW with KUBridge (ARK, PRO, ME) the EBOOT writes a small kernel module, `p4crash.prx`, next to itself and loads it; it registers the default exception handler. A crash in the game then writes `p4crash.txt` in the game folder (thread, exception, EPC and `ra` as `p4+offset`, BadVAddr, all registers, the code addresses on the stack, and the last 16 KB of the log including the lines the writer had not saved yet) and returns to the XMB instead of hanging and powering off. The log says `crash catcher: ... handler 00000000 (on)` when it is active. An empty `CRASHTEST` file next to the EBOOT crashes on purpose at boot to check it. PPSSPP: the module loads, the handler is not available there (`(off)`), the game runs as before. Not yet run on a PSP.
+- Dialogue portraits no longer hitch when they appear (issue #22). Since b491 every big 8-bit 2D image is resampled once to the PSP's size, and that ran all at once at the first draw: ~0.13-0.3 s of CPU per portrait (PPSSPP clock). It now runs ~2 ms a frame (`p4_swz_step_us`), the original image drawn until the copy is done (~50 frames); one-index windows are copied without filtering (68% of a portrait), and the nearest-colour search looks only at the 4x4 source texels around each output texel instead of all 256 palette entries. PPSSPP, Margaret route: portrait picture unchanged, 126 ms over ~53 frames instead of one stall. Not yet run on a PSP.
+
 ## b494 pre-release (2026-11-24)
 
 Fixes on top of b493. Not yet run on a PSP in this release session.

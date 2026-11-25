@@ -186,7 +186,7 @@ def bundle_ffmpeg(bundle, cache=None):
     return download_ffmpeg(cache)
 
 
-def prepare(iso, output, bundle=BUNDLE, workers=4, *, pspdev=None, build_cache=None,
+def prepare(iso, output, bundle=BUNDLE, workers=min(16, os.cpu_count() or 4), *, pspdev=None, build_cache=None,
             upstream_archive=None, build_only=False):
     from psp_audio import available_rows, build_encoder, catalogue, convert as convert_audio, copy_banks, pack_audio
     from psp_video import convert as convert_video, movies
@@ -500,7 +500,7 @@ def main():
     parser.add_argument('--iso', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--bundle', type=Path, default=BUNDLE)
-    parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--workers', type=int, default=min(16, os.cpu_count() or 4))
     parser.add_argument('--pspdev', type=Path, help='Windows PSPDEV root (bin/ and psp/)')
     parser.add_argument('--build-cache', type=Path, help='Local compiler workspace/cache directory')
     parser.add_argument('--upstream-archive', type=Path, help='Pinned upstream ZIP for offline builds')

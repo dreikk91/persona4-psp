@@ -1502,10 +1502,14 @@ int func_003f79b0(void *raster, void *device, int flags)
         vertex_cap = POOL_VERTICES / 2;
         index_cap = POOL_INDICES / 2;
     } else {
-        if (sceDisplaySetFrameBuf((void *)(0x04000000 + (unsigned)draw_buffer), STRIDE,
-                                 PSP_DISPLAY_PIXEL_FORMAT_8888, PSP_DISPLAY_SETBUF_IMMEDIATE) >= 0 && present_new_frame)
+        /* no frame drawn: keep the shown buffer and keep drawing into the hidden one
+           (from the persona4-portable fork, 0277244) */
+        if (present_new_frame &&
+            sceDisplaySetFrameBuf((void *)(0x04000000 + (unsigned)draw_buffer), STRIDE,
+                                  PSP_DISPLAY_PIXEL_FORMAT_8888, PSP_DISPLAY_SETBUF_IMMEDIATE) >= 0) {
             fps_presented();
-        draw_buffer = other;
+            draw_buffer = other;
+        }
         flip_seq = shown_seq = ge_queued;
         pipe_set = 0;
         list = list_store[0];

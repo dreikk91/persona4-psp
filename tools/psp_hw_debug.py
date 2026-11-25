@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from psp_data_census import ROOT, load
-from psp_link import PORT, PORT_ASM, LIB_FLAGS, pbp_icons, run, check_import_ranges, correct_retail_data_symbols
+from psp_link import PORT, PORT_ASM, LIB_FLAGS, pbp_icons, run, check_import_ranges, correct_retail_data_symbols, crash_prx_object
 from psp_make_data import K, PSP_IMAGE, build
 from psp_xref import find_gp
 
@@ -80,7 +80,7 @@ def main():
     rsp = out / "objects.rsp"
     rsp.write_text("".join('"' + p.as_posix() + '"\n' for p in objects), encoding="utf-8")
     elf = out / "p4.elf"
-    port = [out / f"{name}.o" for name in (*PORT, *PORT_ASM)]
+    port = [out / f"{name}.o" for name in (*PORT, *PORT_ASM)] + [crash_prx_object(binpath, sdk, out)]  # b495
     wraps = ["sdkSpriteRequestLoad", "sceGuGetMemory", "sceGuDrawArray", "sceGeListUpdateStallAddr", "func_00397c40",
              "malloc", "calloc", "realloc", "memalign", "free",  # b166 memory census (main.c), as psp_link
              "sceKernelSleepThread", "sceKernelSleepThreadCB"]  # b416 ee.c: every sleep in the watchdog's ring
@@ -120,7 +120,7 @@ def main():
     assert (out / "p4str.bin").read_bytes() == (base / "p4str.bin").read_bytes()
     title = f"Persona 4 b{build_number}" if args.release else f"Persona 4 HW Debug b{build_number}"
     run(binpath / "mksfoex.exe", "-d", "MEMSIZE=1", title, out / "PARAM.SFO")
-    run(binpath / "pack-pbp.exe", out / "EBOOT.PBP", out / "PARAM.SFO", *pbp_icons(), "NULL", "NULL", "NULL", out / "p4.prx", "NULL")
+    run(binpath / "pack-pbp.exe", out / "EBOOT.PBP", out / "PARAM.SFO", *pbp_icons(), "NULL", out / "p4.prx", "NULL")
     print(run(binpath / "psp-size.exe", elf).strip())
     destination.mkdir(parents=True, exist_ok=True)
     artifacts = ["p4.elf", "p4.prx", "EBOOT.PBP", data_name, "p4str.bin"]

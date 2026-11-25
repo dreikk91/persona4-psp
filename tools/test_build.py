@@ -193,8 +193,10 @@ class SourceBuildTests(unittest.TestCase):
         self.assertNotIn('words', config)
         self.assertNotIn('eboot_sha256', config)
         self.assertFalse((self.bundle / 'P4').exists())
-        self.assertTrue(all(path.suffix in ('.c', '.h', '.S', '.py')
-                            for path in (self.bundle / 'source').rglob('*') if path.is_file()))
+        source = self.bundle / 'source'
+        self.assertTrue(all(path.suffix in ('.c', '.h', '.S', '.py') or
+                            (path.parent == source / 'port/icons' and path.name in ('ICON0.PNG', 'PIC1.PNG'))
+                            for path in source.rglob('*') if path.is_file()))
         builder.verify_payload(self.bundle, config)
 
     def test_bundled_toolchain_keeps_provenance_without_local_install_paths(self):

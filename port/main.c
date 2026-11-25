@@ -15,7 +15,7 @@ PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
 PSP_HEAP_SIZE_KB(-1); /* the heap is claimed before main */
 PSP_HEAP_THRESHOLD_SIZE_KB(4096); /* left free: thread stacks */
 
-#define BUILD 494
+#define BUILD 495
 #define P4_IMAGE_SIZE 0x40B000 /* retail 0x52da00..0x938a00: data and bss */
 #include "paths.h"
 #define GAME_DIR "ms0:/PSP/GAME/P4/" /* only until p4_paths_init: the log before it */
@@ -48,6 +48,12 @@ char p4_log_ring[LOG_RING];
 static volatile unsigned log_head, log_tail, log_dropped;
 static int log_thread_running;
 int p4_log_sync;
+const int p4_build_number = BUILD; /* b495 crash.c */
+unsigned p4_log_ring_state(const char **ring, unsigned *size) /* b495 crash.c: the ring's end goes into p4crash.txt */
+{
+    *ring = p4_log_ring, *size = LOG_RING;
+    return log_head;
+}
 
 /* The file first: a PSPLink stdout write blocks while the USB cable is out (b111: thousands of reconnects an evening),
    and the log on the memory stick must keep going meanwhile. */
@@ -451,12 +457,16 @@ void p4_log(const char *fmt, ...)
     va_list args;
     int n = snprintf(line, sizeof line, "b%d ", BUILD);
     va_start(args, fmt);
-    n += vsnprintf(line + n, sizeof line - n, fmt, args);
+    int body = vsnprintf(line + n, sizeof line - n, fmt, args);
     va_end(args);
-    if (n < 0)
+    if (body < 0)
         return;
-    if (n >= (int)sizeof line)
+    if (body >= (int)sizeof line - n) { /* cut: still end the line (from the persona4-portable fork, e10a33f) */
         n = sizeof line - 1;
+        line[n - 1] = '\n';
+    } else {
+        n += body;
+    }
     if (!p4_quiet)
         pspDebugScreenPrintf("%s", line);
     int intr = pspSdkDisableInterrupts();
@@ -631,10 +641,31 @@ int main(int argc, char **argv)
         }
         snprintf(log_path, sizeof log_path, "%s%s", p4_game_dir, LOG_FILE);
         p4_log("game folder %s\n", p4_game_dir);
+        SceIoStat st;
+        if (sceIoGetstat(p4_path("p4files.idx"), &st) < 0) { /* issue #20: an "EBOOT only" build has no game archives */
+            p4_log("p4files.idx missing: game archives were not prepared\n");
+            pspDebugScreenPrintf("Game files are missing (p4files.idx, DATA.*, SOUND).\n\n"
+                                 "Run the full preparation (without \"Build EBOOT only\")\n"
+                                 "and copy the whole P4 folder to PSP/GAME/.\n");
+            sceKernelDelayThread(10 * 1000 * 1000);
+            sceKernelExitGame();
+            return 1;
+        }
     }
     { /* b376: the caches' arena, before the game takes its first block */
         extern void p4_arena_init(void);
         p4_arena_init();
+    }
+    { /* b495 (issue #21): the crash catcher (crash.c); an empty CRASHTEST file next to the EBOOT then stores to
+         address 4, to see p4crash.txt written and the return to the XMB on a device */
+        extern void p4_crash_init(void);
+        p4_crash_init();
+        SceIoStat st;
+        if (sceIoGetstat(p4_path("CRASHTEST"), &st) >= 0) {
+            p4_log("CRASHTEST: a store to address 4 now\n");
+            p4_log_flush();
+            *(volatile int *)4 = 0;
+        }
     }
     { /* b321: an empty FPS file next to the EBOOT turns the frame-rate overlay on (rwsky.c) */
         extern int p4_fps_overlay;

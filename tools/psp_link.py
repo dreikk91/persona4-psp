@@ -21,11 +21,38 @@ TAIL = re.compile(r"([0-9A-Fa-f]{8})$")
 NO_SOUND = "src__cri__"  # ponytail: CRI needs the IOP; every call into it returns 0 until audio has its own mixer
 # RenderWare exists three times, twice in C and in retail, each with its own statics. Retail keeps the data consistent.
 RETAIL_WORLD = ("src__renderware__", "src__rw__")
-PORT = ("main", "platform", "rwsky", "rwdata", "rwmath", "files", "ee", "pad", "memcard", "video", "video_game", "audio", "audio_game", "scene_menu", "paths")
-PORT_ASM = ("video_nal",)
+PORT = ("main", "platform", "rwsky", "rwdata", "rwmath", "files", "ee", "pad", "memcard", "video", "video_game", "audio", "audio_game", "scene_menu", "paths", "crash")
+PORT_ASM = ("kubridge", "video_nal")
 # video_nal.S supplies the first sceMpeg stub. Its remaining stubs must follow
-# immediately: psp-fixup-imports describes each library as one contiguous range.
+# immediately: psp-fixup-imports describes each library as one contiguous range
+# (b495: so kubridge.S comes before it, not between it and libpspmpeg).
 LIB_FLAGS = ["-lpspmpeg", "-lpspdmac", "-lpspsascore", "-lpspgum", "-lpspgu", "-lpspdebug", "-lpspdisplay", "-lpspge", "-lpspctrl", "-lpsppower", "-lpspaudio", "-Wl,-u,sceUtilityGetSystemParamInt", "-lpsputility", "-lm"]
+
+
+def crash_prx_object(bin_dir, sdk, out):
+    """b495: the crash catcher's kernel half (port/p4crash_prx.c) as its own kernel PRX, returned as an object that
+    holds its bytes (p4crash_prx[], p4crash_prx_size) for port/crash.c, which writes it next to the EBOOT at boot."""
+    out = Path(out)
+    flags = ["-O2", "-G0", "-Wall", "-fno-builtin", "-D_PSP_FW_VERSION=600", f"-I{Path(sdk) / 'include'}"]
+    run(Path(bin_dir) / "psp-gcc.exe", *flags, "-c", ROOT / "port" / "p4crash_prx.c", "-o", out / "p4crash_prx.o")
+    # pspsdk's default exports have no module_stop: a stop would not run it (psp-developer debug-tools.md)
+    (out / "p4crash.exp").write_text("PSP_BEGIN_EXPORTS\nPSP_EXPORT_START(syslib, 0, 0x8000)\nPSP_EXPORT_FUNC_HASH(module_start)\n"
+                                     "PSP_EXPORT_FUNC_HASH(module_stop)\nPSP_EXPORT_VAR_HASH(module_info)\nPSP_EXPORT_END\n"
+                                     "PSP_END_EXPORTS\n", encoding="utf-8")
+    (out / "p4crash_exports.c").write_text(run(Path(bin_dir) / "psp-build-exports.exe", "-b", out / "p4crash.exp"), encoding="utf-8")
+    run(Path(bin_dir) / "psp-gcc.exe", *flags, "-c", out / "p4crash_exports.c", "-o", out / "p4crash_exports.o")
+    elf = out / "p4crash.elf"
+    run(Path(bin_dir) / "psp-gcc.exe", "-G0", "-nostartfiles", f"-L{Path(sdk) / 'lib'}", f"-specs={Path(sdk) / 'lib' / 'prxspecs'}",
+        f"-Wl,-q,-T{(Path(sdk) / 'lib' / 'linkfile.prx').as_posix()}", out / "p4crash_prx.o", out / "p4crash_exports.o",
+        "-lpspkernel", "-o", elf)
+    run(Path(bin_dir) / "psp-fixup-imports.exe", elf)
+    run(Path(bin_dir) / "psp-prxgen.exe", elf, out / "p4crash.prx")
+    data = (out / "p4crash.prx").read_bytes()
+    rows = "".join(".byte " + ",".join(str(b) for b in data[i:i + 32]) + "\n" for i in range(0, len(data), 32))
+    (out / "p4crash_blob.S").write_text(".section .rodata\n.balign 64\n.globl p4crash_prx\np4crash_prx:\n" + rows +
+                                        f".balign 4\n.globl p4crash_prx_size\np4crash_prx_size:\n.word {len(data)}\n", encoding="utf-8")
+    run(Path(bin_dir) / "psp-gcc.exe", "-c", out / "p4crash_blob.S", "-o", out / "p4crash_blob.o")
+    return out / "p4crash_blob.o"
 
 
 def check_import_ranges(elf):
@@ -53,8 +80,11 @@ def check_import_ranges(elf):
 
 
 def pbp_icons():
-    """ICON0/PIC1 from the local, git-ignored build/icons when present; NULL otherwise, so packaged builds stay reproducible."""
-    return [path if path.is_file() else "NULL" for path in (ROOT / "build/icons/ICON0.PNG", ROOT / "build/icons/PIC1.PNG")]
+    """pack-pbp's four image slots ICON0, ICON1, PIC0, PIC1: ICON0 (144x80) and PIC1 (480x272) from port/icons, shipped
+    in the source package, NULL when absent; ICON1 (an animated PMF) and PIC0 stay empty. b495: PIC1 used to land in
+    the ICON1 slot."""
+    icon0, pic1 = (path if path.is_file() else "NULL" for path in (ROOT / "port/icons/ICON0.PNG", ROOT / "port/icons/PIC1.PNG"))
+    return [icon0, "NULL", "NULL", pic1]
 
 
 def run(*cmd):
@@ -134,6 +164,7 @@ def main():
     for source in PORT_ASM:
         port_objects.append(OUT / (source + ".o"))
         run(BIN / "psp-gcc.exe", *flags, "-c", ROOT / "port" / (source + ".S"), "-o", port_objects[-1])
+    port_objects.append(crash_prx_object(BIN, SDK, OUT))  # b495
     ours = {n for path in port_objects for kind, n in symbols(path)[1] if kind in "TDB"}
     for path, (_, defs, _) in zip(objects, results):  # a port function replaces the game's
         replaced = [n for kind, n in defs if kind in "TW" and n in ours]
@@ -218,7 +249,7 @@ def main():
     audit_addresses()
     run(BIN / "mksfoex.exe", "-d", "MEMSIZE=1", "Persona 4", OUT / "PARAM.SFO")
     run(BIN / "psp-strip.exe", elf, "-o", OUT / "strip.elf")
-    run(BIN / "pack-pbp.exe", OUT / "EBOOT.PBP", OUT / "PARAM.SFO", *pbp_icons(), "NULL", "NULL", "NULL", OUT / "strip.elf", "NULL")
+    run(BIN / "pack-pbp.exe", OUT / "EBOOT.PBP", OUT / "PARAM.SFO", *pbp_icons(), "NULL", OUT / "strip.elf", "NULL")
     DIST.mkdir(parents=True, exist_ok=True)
     for name in ("EBOOT.PBP", "p4data.bin", "p4str.bin"):
         (DIST / name).write_bytes((OUT / name).read_bytes())
