@@ -269,4 +269,3 @@ void p4_vu0_report(unsigned frames)
     vu0_ops = vu0_blocks = 0;
 }
 
-#include "eff_rotate.h" /* b480 */

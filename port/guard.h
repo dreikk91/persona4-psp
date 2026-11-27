@@ -105,7 +105,7 @@ static void mat4_mul(Mat4 out, Mat4 a, Mat4 b)
 
 P4_HOT static void set_matrix(int which, const Matrix *m)
 {
-    if (p4_ge_raw && (which == GU_MODEL || which == GU_VIEW)) { /* b365: number word, then 12 floats >> 8 by rows */
+    if (which == GU_MODEL || which == GU_VIEW) { /* b365: number word, then 12 floats >> 8 by rows */
         const V3 *row[4] = { &m->right, &m->up, &m->at, &m->pos };
         unsigned cmd = which == GU_MODEL ? 0x3A : 0x3C, *c = gu_list->current;
         *c++ = cmd << 24;
@@ -252,32 +252,13 @@ enum { GUARD_MEMO = 1024 };
 static struct { const V3 *position; unsigned key; } *guard_memo; /* b299: same 1024 entries, heap to leave fixed-image space */
 
 /* model (0: the world) times view times projection: model space to clip space */
-/* b444 p4_guard_snap Q (view-space units, 0 off): the guard cuts for the camera's view with its translation rounded
-   to a grid of Q. While the camera moves inside one cell the cut (guard results) and the static lists recorded with
-   it stay the same, so a running camera keeps its guard lists for several frames instead of taking the long path
-   every frame (b441 profile, Heaven running: ~9 ms). The cut planes pass through the snapped eye; geometry closer to
-   the eye than about Q could fall behind the real eye and smear: keep Q well below the camera's height. Drawing
-   still uses the real view (set_camera). */
-float p4_guard_snap = 0;
-static Matrix guard_view_now(void)
-{
-    Matrix v = *(const Matrix *)((char *)current_camera + CAMERA_VIEW);
-    if (p4_guard_snap > 0) {
-        float q = p4_guard_snap;
-        v.pos.x = floorf(v.pos.x / q + 0.5f) * q;
-        v.pos.y = floorf(v.pos.y / q + 0.5f) * q;
-        v.pos.z = floorf(v.pos.z / q + 0.5f) * q;
-    }
-    return v;
-}
 static void guard_matrix(Mat4 m, const Matrix *model)
 {
     Mat4 view, projection;
     ScePspFMatrix4 p;
     camera_projection(&p);
     memcpy(projection, &p, sizeof projection);
-    Matrix gv = guard_view_now(); /* b444 */
-    mat4_from(view, &gv);
+    mat4_from(view, (const Matrix *)((char *)current_camera + CAMERA_VIEW));
     if (model) {
         mat4_from(m, model);
         mat4_mul(m, m, view);
@@ -336,8 +317,7 @@ P4_HOT static void guard_world_planes(void)
 {
     unsigned key[18];
     key[0] = (unsigned)current_camera;
-    Matrix gv = guard_view_now(); /* b444: the snapped view keys the planes */
-    memcpy(key + 1, &gv, 15 * 4); /* right, up, at (each + a pad word), pos */
+    memcpy(key + 1, (char *)current_camera + CAMERA_VIEW, 15 * 4); /* right, up, at (each + a pad word), pos */
     memcpy(key + 16, (char *)current_camera + CAMERA_NEAR, 4);
     memcpy(key + 17, (char *)current_camera + CAMERA_FAR, 4);
     if (guard_world.known && !memcmp(key, guard_world.key, sizeof key))

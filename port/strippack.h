@@ -72,7 +72,7 @@ static int sp_join(const unsigned short *entry, unsigned short *out, int cap)
 
 /* The entry's strips one after the other, unjoined (each its own PRIM): out gets the indices, lens the lengths.
    Returns the strip count, 0 when malformed or over cap / max_strips. */
-static int sp_split(const unsigned short *entry, unsigned short *out, int cap, unsigned short *lens, int max_strips)
+static inline int sp_split(const unsigned short *entry, unsigned short *out, int cap, unsigned short *lens, int max_strips)
 {
     int strips = entry[0], total = entry[1], sum = 0;
     if (strips > max_strips || total > cap)

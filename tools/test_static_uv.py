@@ -65,7 +65,6 @@ int main(void) {
 #include <string.h>
 #include <stdio.h>
 #include "static_uv.h"
-#include "static_position.h"
 enum {GU_TEXTURE_16BIT=2,GU_TEXTURE_32BITF=3,GU_TEXTURE_BITS=3,GU_COLOR_8888=7<<2,GU_COLOR_BITS=7<<2,
       GU_NORMAL_8BIT=1<<5,GU_NORMAL_BITS=3<<5,GU_VERTEX_16BIT=2<<7,GU_VERTEX_32BITF=3<<7,GU_VERTEX_BITS=3<<7,
       GU_WEIGHT_BITS=3<<9,GU_INDEX_16BIT=2<<11,GU_INDEX_BITS=3<<11};
@@ -103,9 +102,6 @@ int main(void) {
         assert(draw_vertex_alpha(type,5,ix,source,&lo,&hi));
         assert(draw_vertex_alpha((type&~GU_TEXTURE_BITS)|GU_TEXTURE_16BIT,5,ix,packed,&plo,&phi));
         assert(lo==plo && hi==phi);
-        static_position_copy(compact, packed, 128, 1.0f, stride - 16);
-        assert(draw_vertex_alpha((type&~(GU_TEXTURE_BITS|GU_VERTEX_BITS))|GU_TEXTURE_16BIT|GU_VERTEX_16BIT,5,ix,compact,&plo,&phi));
-        assert(lo==plo && hi==phi);
         packed[4]^=1;assert(!static_uv_same(source,packed,128,stride,decode));
     }
     {float bad=INFINITY;memcpy(source,&bad,4);memset(packed,0xcc,sizeof packed);
@@ -122,67 +118,6 @@ int main(void) {
 '''
         self.check_c(code)
 
-    def test_exact_position_conversion(self):
-        self.check_c(r'''
-#include <assert.h>
-#include <math.h>
-#include <string.h>
-#include <stdio.h>
-#include "static_position.h"
-int main(void) {
-    unsigned char source[128*20],packed[128*16+1];unsigned seed=17;
-    int accepted=0;
-    for(int e=-20;e<=19;e++) {
-        float bound=ldexpf(1,e)*0.75f,worst=0;
-        for(int i=0;i<128;i++) {
-            float p[3];
-            memset(source+i*20,i,20);
-            for(int k=0;k<3;k++) {
-                seed=seed*1664525u+1013904223u;
-                p[k]=((float)(seed>>8)/(1<<24)*2-1)*bound;
-            }
-            memcpy(source+i*20+8,p,12);
-        }
-        float scale=static_position_scale(source,128,8,bound);assert(scale>0 && scale<4*bound);
-        memset(packed,0xff,sizeof packed);static_position_copy(packed,source,128,scale,8);
-        assert(packed[128*16]==0xff);
-        for(int i=0;i<128;i++) {
-            float p[3];short q[3];memcpy(p,source+i*20+8,12);memcpy(q,packed+i*16+8,6);
-            assert(!memcmp(source+i*20,packed+i*16,8));
-            for(int k=0;k<3;k++){float d=fabsf(q[k]*(scale/32768)-p[k]);if(d>worst)worst=d;}
-            accepted++;
-        }
-        assert(worst<=scale/65536*1.001f); /* nearest grid point */
-    }
-    {/* the bound itself and its negation stay inside s16 */
-     float p[3]={1000,-1000,0};memcpy(source+8,p,12);float scale=static_position_scale(source,1,8,1000);
-     static_position_copy(packed,source,1,scale,8);short q[3];memcpy(q,packed+8,6);assert(q[0]<=32767&&q[1]>=-32767);}
-    {/* two meshes of one geometry: a vertex they share lands on the same s16 */
-     unsigned char a[2*20],b[3*20],pa[2*16],pb[3*16];float v[3]={123.456f,-7.89f,0.001f},w[3]={1,2,3};
-     memcpy(a+8,v,12);memcpy(a+28,w,12);memcpy(b+8,w,12);memcpy(b+28,w,12);memcpy(b+48,v,12);
-     float sa=static_position_scale(a,2,8,200),sb=static_position_scale(b,3,8,200);assert(sa==sb);
-     static_position_copy(pa,a,2,sa,8);static_position_copy(pb,b,3,sb,8);assert(!memcmp(pa+8,pb+40,6));}
-    {unsigned char lit[64*24],out[64*20+1];float scale;
-     for(int i=0;i<64;i++){float p[3]={i*0.25f,-i*0.5f,i};memset(lit+i*24,i+1,12);memcpy(lit+i*24+12,p,12);}
-     scale=static_position_scale(lit,64,12,64);assert(scale>0);
-     memset(out,0xff,sizeof out);static_position_copy(out,lit,64,scale,12);assert(out[64*20]==0xff);
-     for(int i=0;i<64;i++){float p[3];short q[3];memcpy(p,lit+i*24+12,12);memcpy(q,out+i*20+12,6);
-      assert(!memcmp(lit+i*24,out+i*20,12)); /* UV, colour, normal and pad unchanged */
-      assert(!out[i*20+18]&&!out[i*20+19]);
-      for(int k=0;k<3;k++)assert(q[k]*(scale/32768)==p[k]);}}
-    {float p[3]={-1,0.1f,0};memcpy(source+8,p,12);
-     assert(static_position_scale(source,1,8,1)==2);
-     p[0]=1.5f;memcpy(source+8,p,12);assert(!static_position_scale(source,1,8,1)); /* outside the sphere */
-     p[0]=NAN;memcpy(source+8,p,12);assert(!static_position_scale(source,1,8,1));
-     p[0]=INFINITY;memcpy(source+8,p,12);assert(!static_position_scale(source,1,8,1));
-     p[0]=0;memcpy(source+8,p,12);assert(!static_position_scale(source,1,8,0)&&!static_position_scale(source,1,8,NAN)&&
-        !static_position_scale(source,1,8,1048576));}
-    assert(!static_position_scale(0,1,8,1) && !static_position_scale(source,0,8,1) && !static_position_scale(source,65537,8,1));
-    printf("%d rounded positions across 40 binary bounds; shared vertices agree; invalid inputs refused\n",accepted);
-    return 0;
-}
-''')
-
     def test_list_owns_packed_vertices_and_indices(self):
         rw = ''.join(p.read_text() for p in [ROOT / 'port/rwsky.c', *sorted((ROOT / 'port').glob('*.h'))])
         sl = (ROOT / 'port/static_list.h').read_text()
@@ -197,7 +132,6 @@ int main(void) {
 #include <stdlib.h>
 #include <string.h>
 #include "static_uv.h"
-#include "static_position.h"
 '''+types+entry+r'''
 typedef struct {void *v;unsigned short *idx;int vertices,indices,capacity,vtype;} MeshCache;
 static unsigned sl_fog_key(void){return 0;}
@@ -316,3 +250,7 @@ int main(void) {
 }
 '''
         self.check_c(code)
+
+
+if __name__ == "__main__":
+    unittest.main()

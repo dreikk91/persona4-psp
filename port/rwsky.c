@@ -578,7 +578,6 @@ static void hanim_report(void);
 extern int p4_frameskip_bones;
 extern int p4_bone_check;
 static unsigned bone_bad_count;
-extern int p4_hanim_nan_fix;
 static void look_report(void);
 static unsigned hanim_nan_fixed;
 static unsigned hanim_nan_after_update;
@@ -612,7 +611,7 @@ enum { VT_3D = GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_INDEX_1
 static void churn_report(unsigned frames);
 static void churn_top_report(unsigned frames);
 static void shadow_report(unsigned frames);
-extern int p4_skin_diff, p4_skin_finite;
+extern int p4_skin_diff;
 static unsigned skin_diff_checked, skin_diff_count;
 extern int p4_churn_top;
 extern int p4_ge_skin;
@@ -623,29 +622,14 @@ static unsigned skin_ge_draws, skin_ge_batches, skin_ge_fallbacks, skin_ge_build
 static unsigned skin_build_us, skin_build_max_us, skin_build_max_v; /* b212: skin cache build time */
 int p4_skin_disk = 1; /* b514: see skin_disk.h */
 static unsigned skin_disk_hits, skin_disk_writes, skin_disk_misses, skin_disk_us;
-extern int p4_skin_strip;
 static unsigned strip_batches, strip_failed, strip_list_idx, strip_idx; /* b209 */
-float p4_skin_lod_depth = 0; /* b245, see skin_geometry; b254: 900 (b246 dialogue: 78 -> 67 ms). b308: off until rebuilt: the online
-   simplifier opened holes in the far party's faces after the Heaven battle (PPSSPP), at any per-mesh minimum */
-int p4_skin_lod_keep = 50;
-/* b306: meshes under this many triangles stay whole in a simplified entry. Halving the small ones (eyes, lids, the
-   parts behind the TV-world glasses) opened holes in the far party's faces after the Heaven battle; they carry little
-   of the GE's work. Part of the cache key, so a poke rebuilds. b307: not enough, the holes stayed at 128. */
-int p4_skin_lod_min = 128;
-/* b254 far level: beyond p4_skin_far_depth a character is drawn with at most p4_skin_far_bones weighted bones
-   (bone_lod.h: dropped bones follow their nearest kept ancestor) and p4_skin_far_keep percent of its triangles, so
-   each mesh is one GE batch (b245 Heaven: the far Margaret was 34 batches and ~150 bones a frame). 0 depth: off. */
-float p4_skin_far_depth = 0; /* b308: off with p4_skin_lod_depth (same simplifier); was 3000, no CPU gain measured */
-int p4_skin_far_keep = 30, p4_skin_far_bones = 8;
-static unsigned skin_lod_draws, skin_full_draws, skin_far_draws, skin_far_builds, skin_far_bones_kept, skin_far_bones_in, skin_far_us, skin_far_fallbacks;
-int p4_skin_free_wait = 1; /* b241 */
+static unsigned skin_far_builds, skin_far_bones_kept, skin_far_bones_in, skin_far_us, skin_far_fallbacks;
 int p4_skin_dummy = 0;
 static unsigned skin_free_waits, skin_dummies;
 /* b213: p4_strip_why 1 runs b210's whole-mesh diagnosis (two strips over every mesh: on the PSP most of the 7 s of a
    party's strip build); p4_strip_check 1 also runs b209's linear start search and compares the strips */
 extern int p4_strip_why, p4_strip_check;
 /* b250: strips made on the PC (tools/psp_strips.py -> p4strips.bin), looked up by a batch's index list; see port/strippack.h */
-extern int p4_strip_pack, p4_strip_prims;
 static unsigned pack_hits, pack_misses, pack_refused, pack_us, pack_prims;
 static int pack_fd = -1, pack_count;
 static unsigned strip_checks, strip_check_diffs, strip_us;
@@ -768,8 +752,6 @@ int p4_guard_clip = 1; /* 0: every triangle goes to the GE as before, for A/B on
                            floor; b97 room: the guard cost 13.7 ms of CPU, so b99 made it cheap: p4_guard_compact) */
 static int index_used;
 static unsigned cache_bytes, cache_frame, cache_hits, cache_builds, cache_misses, cache_noslot, guard_mesh_draws;
-extern int p4_ge_split, p4_ge_split_grow; /* b434, mesh.h */
-static unsigned ge_split_meshes, ge_split_tri_in, ge_split_tri_out, ge_split_refused, ge_split_us;
 int p4_mesh_cache = 1; /* 0: build every frame, as b68 */
 int p4_lock_memo = 1; /* b167: unlocked geometry reuses its sampled key and UV shift (draw_meshes_body); 0: as b166 */
 static unsigned lock_memo_hits;
@@ -896,7 +878,6 @@ int func_00401aa0(void) { return 1; }
 /* Native textures (read from files, never drawn into) go to the GE swizzled: one 16-byte by 8-row block is one texture
    cache line (PPSSPP docs, GE performance). RenderWare's raster keeps its fields; a 64-byte head in front of the
    pixels says the buffer is swizzled and how it is padded. A lock turns it back into rows. */
-int p4_swizzle_textures = 1; /* 0: textures stay in rows, as b76 */
 enum { SWIZZLE_HEAD = 64, SWIZZLE_MAGIC = 0x5a1e5a1e };
 /* used: the palette entries the texels use (bit per entry); alpha_min: the smallest texel alpha, for draw_tested. */
 typedef struct { unsigned magic, check, wbytes, rows; unsigned char used[32]; unsigned alpha_min, levels, alpha_max; } SwizzleHead;
@@ -965,8 +946,8 @@ static void raster_used_entries(const Raster *r, unsigned char used[32])
 /* Mipmaps (PPSSPP GE performance; skill textures-uv): far surfaces read a smaller level, fewer texels per pixel.
    Levels come from level 0 by 2:1 point decimation, so palette indices stay as they are, and stop at one swizzle block
    (16 bytes) wide or 8 rows high. Only power-of-two rasters of at least p4_mip_min texels; levels sit after level 0 in
-   the same block. p4_mipmaps is read when a texture is bound: 0 draws level 0 only, as b88 (live A/B). */
-int p4_mip_build = 1, p4_mip_min = 64, p4_mipmaps = 1;
+   the same block. */
+int p4_mip_build = 1, p4_mip_min = 64;
 enum { MAX_MIPS = 8 };
 static int mip_level_size(const Raster *r, int level, int *wbytes, int *rows)
 {
@@ -1048,7 +1029,7 @@ static void swizzle_raster(Raster *r)
 }
 static void swizzle_raster_body(Raster *r)
 {
-    if (!p4_swizzle_textures || !r->originalPixels || swizzle_head(r->originalPixels))
+    if (!r->originalPixels || swizzle_head(r->originalPixels))
         return;
     int wbytes = (r->stride + 15) & ~15, rows = (r->height + 7) & ~7;
     int levels = mip_levels(r), total = wbytes * rows, w, h;
@@ -1791,10 +1772,6 @@ int func_003f79b0(void *raster, void *device, int flags)
             p4_cache_budget = want;
         }
         p4_log("mesh cache on %d hits %u builds %u misses %u noslot %u bytes %u budget %u heap_free %u guarded_meshes %u\n", p4_mesh_cache, cache_hits, cache_builds, cache_misses, cache_noslot, cache_bytes, p4_cache_budget, heap_free, guard_mesh_draws);
-        if (p4_ge_split || ge_split_refused) /* b434 */
-            p4_log("ge split %d grow %d: meshes %u triangles %u -> %u refused %u took %u us\n", p4_ge_split, p4_ge_split_grow, ge_split_meshes,
-                   ge_split_tri_in, ge_split_tri_out, ge_split_refused, ge_split_us);
-        ge_split_meshes = ge_split_tri_in = ge_split_tri_out = ge_split_refused = ge_split_us = 0;
         p4_log("cache audit %d checks %u stale positions %u uvs %u prelight %u vertices %u\n", p4_cache_audit, audit_checks, audit_stale[0], audit_stale[1], audit_stale[2], audit_stale_vertices);
         audit_checks = audit_stale[0] = audit_stale[1] = audit_stale[2] = audit_stale_vertices = 0;
         p4_log("lock memo %d hits %u\n", p4_lock_memo, lock_memo_hits);
@@ -1805,8 +1782,7 @@ int func_003f79b0(void *raster, void *device, int flags)
         work_shaded = work_ge_emitted = work_cpu_emitted = work_ge_draws = 0;
         void p4_vu0_report(unsigned frames);
         p4_vu0_report(256);
-        { void p4_eff_rotate_report(void); p4_eff_rotate_report(); }
-        p4_log("textures swizzled %u bytes %u mipmapped %u mip_bytes %u mipmaps %d\n", swizzled_textures, swizzled_bytes, mip_textures, mip_bytes, p4_mipmaps);
+        p4_log("textures swizzled %u bytes %u mipmapped %u mip_bytes %u\n", swizzled_textures, swizzled_bytes, mip_textures, mip_bytes);
         tex_census_report(); /* b394 */
         churn_report(256);
         if (p4_churn_top)
@@ -1822,14 +1798,14 @@ int func_003f79b0(void *raster, void *device, int flags)
                    skin_disk_misses, skin_disk_us), skin_disk_hits = skin_disk_writes = skin_disk_misses = skin_disk_us = 0;
         if (p4_skin_diff)
             p4_log("skin diff per 256 frames: checked %u differing %u\n", skin_diff_checked, skin_diff_count), skin_diff_checked = skin_diff_count = 0;
-        p4_log("skin finite %d bones out %u per 256 frames\n", p4_skin_finite, skin_nonfinite_bones), skin_nonfinite_bones = 0;
+        p4_log("skin non-finite bones out %u per 256 frames\n", skin_nonfinite_bones), skin_nonfinite_bones = 0;
         if (strip_batches || strip_failed)
-            p4_log("skin strip %d: batches built as strips %u (list indices %u -> %u), failed checks %u, took %u us; check %d: %u compared, %u differ\n",
-                   p4_skin_strip, strip_batches, strip_list_idx, strip_idx, strip_failed, strip_us, p4_strip_check, strip_checks, strip_check_diffs);
+            p4_log("skin strip: batches built as strips %u (list indices %u -> %u), failed checks %u, took %u us; check %d: %u compared, %u differ\n",
+                   strip_batches, strip_list_idx, strip_idx, strip_failed, strip_us, p4_strip_check, strip_checks, strip_check_diffs);
         strip_batches = strip_failed = strip_list_idx = strip_idx = strip_us = strip_checks = strip_check_diffs = 0;
-        if (p4_strip_pack || pack_hits || pack_misses || pack_refused)
-            p4_log("strip pack %d prims %d: %d batches in the file, found %u not found %u refused %u, %u us, PRIMs of found batches %u\n",
-                   p4_strip_pack, p4_strip_prims, pack_count, pack_hits, pack_misses, pack_refused, pack_us, pack_prims);
+        if (pack_hits || pack_misses || pack_refused)
+            p4_log("strip pack: %d batches in the file, found %u not found %u refused %u, %u us, PRIMs of found batches %u\n",
+                   pack_count, pack_hits, pack_misses, pack_refused, pack_us, pack_prims);
         if (pack_fd >= 0 && !pack_hits && !pack_misses && !pack_refused) /* not used since the last report: give the handle back */
             sceIoClose(pack_fd), pack_fd = -1;
         pack_hits = pack_misses = pack_refused = pack_us = pack_prims = 0;
@@ -1886,16 +1862,16 @@ int func_003f79b0(void *raster, void *device, int flags)
         p4_log("frameskip %d max %d: ticks %u skipped %u debt_us %d cap %d\n", p4_frameskip, p4_frameskip_max, skip_ticks, skipped_frames, skip_debt_us, skip_cap);
         skip_ticks = skipped_frames = 0;
         p4_log("frameskip bones %d: bone updates skipped %u\n", p4_frameskip_bones, skipped_bone_updates);
-        p4_log("hanim nan fix %d: frames fixed %u, nan right after update %u; bone check %d: bad bone matrices %u\n", p4_hanim_nan_fix, hanim_nan_fixed, hanim_nan_after_update, p4_bone_check, bone_bad_count);
-        { extern int p4_hanim_key_span; extern unsigned p4_hanim_equal_keys[2];
-          p4_log("hanim key span %d: equal-time keys plain %u compressed %u\n", p4_hanim_key_span, p4_hanim_equal_keys[0], p4_hanim_equal_keys[1]);
+        p4_log("hanim nan fix: frames fixed %u, nan right after update %u; bone check %d: bad bone matrices %u\n", hanim_nan_fixed, hanim_nan_after_update, p4_bone_check, bone_bad_count);
+        { extern unsigned p4_hanim_equal_keys[2];
+          p4_log("hanim key span: equal-time keys plain %u compressed %u\n", p4_hanim_equal_keys[0], p4_hanim_equal_keys[1]);
           p4_hanim_equal_keys[0] = p4_hanim_equal_keys[1] = 0; }
         hanim_nan_fixed = hanim_nan_after_update = 0;
         bone_bad_count = 0;
         look_report();
         { extern void p4_anim_report(void); p4_anim_report(); }
         { extern void p4_interp_report(void); p4_interp_report(); }
-        { extern int p4_skin_guard_box; extern unsigned skin_box_saved_count(void); p4_log("skin guard box %d: bones kept on the GE by their box %u\n", p4_skin_guard_box, skin_box_saved_count()); }
+        { extern unsigned skin_box_saved_count(void); p4_log("skin guard box: bones kept on the GE by their box %u\n", skin_box_saved_count()); }
         p4_log("skin guard fast %d checks %u diffs %u; skin vfpu %d unaligned %u checks %u diffs %u max_diff %d/1e6\n", p4_skin_guard_fast, skin_guard_checks, skin_guard_diffs, p4_skin_vfpu, skin_vfpu_unaligned, skin_vfpu_checks, skin_vfpu_diffs, (int)(skin_vfpu_max_diff * 1e6f));
         skin_guard_checks = skin_guard_diffs = skin_vfpu_unaligned = skin_vfpu_checks = skin_vfpu_diffs = 0;
         skin_vfpu_max_diff = 0;
@@ -2068,12 +2044,10 @@ static int exp_scissor_on;
    2D state setup 1.17 -> 0.66 M cycles a frame, CPU -1.6 ms, picture unchanged. 0: as before. */
 int p4_2d_lean = 1;
 static unsigned ui_epoch; /* b1401: bumped by every GE state change outside the 2D path (p4_2d_cache) */
-static const unsigned *strip_tail;
 static void gu_dirty_body(int flush);
 static void gu_dirty(void) { gu_dirty_body(1); }
 static void gu_dirty_body(int flush)
 {
-    strip_tail = 0;
     if (flush)
         stall_flush(), ui_epoch++;
     if (exp_scissor_on) {
@@ -2115,11 +2089,10 @@ static void bind_texscale(const float *uvs)
         gs.texscale_known = gu_mesh_mode;
     }
 }
-/* b365 p4_ge_raw 1: the state cache writes its GE words itself instead of calling libpspgu (one call, a switch and a
+/* b365: the state cache writes its GE words itself instead of calling libpspgu (one call, a switch and a
    store each in libpspgu), as native games do. libpspgu's own record of enabled states (gu_states, read by
    sceGuGetStatus in im2d.h and shadow_capsules.h) is kept the same. States whose enable sends more than one word or
-   reads libpspgu's context (scissor, fragment 2x, face normal reverse, patch face) still go through it. 0: libpspgu. */
-int p4_ge_raw = 1;
+   reads libpspgu's context (scissor, fragment 2x, face normal reverse, patch face) still go through it. */
 extern unsigned int gu_states;
 static const unsigned char ge_enable_cmd[22] = { 0x22, 0x23, 0, 0x24, 0x21, 0x1D, 0x20, 0x1F, 0x1C, 0x1E, 0x17, 0x18, 0x19,
                                                  0x1A, 0x1B, 0x25, 0x26, 0x27, 0x28, 0, 0, 0 };
@@ -2142,7 +2115,7 @@ static void st_enable(int state, int on)
         gs.known |= bit;
         gs.enabled = on ? gs.enabled | bit : gs.enabled & ~bit;
     }
-    unsigned cmd = p4_ge_raw && state >= 0 && state < 22 ? ge_enable_cmd[state] : 0;
+    unsigned cmd = state >= 0 && state < 22 ? ge_enable_cmd[state] : 0;
     if (cmd) {
         ge_word(cmd, on != 0);
         gu_states = on ? gu_states | 1u << state : gu_states & ~(1u << state);
@@ -2158,10 +2131,7 @@ static void st_alpha_func(int func, int ref)
             return;
         gs.alpha_known = 1, gs.alpha_func = func, gs.alpha_ref = ref;
     }
-    if (p4_ge_raw)
-        ge_word(0xDB, func | (ref & 0xff) << 8 | 0xff << 16);
-    else
-        sceGuAlphaFunc(func, ref, 0xff);
+    ge_word(0xDB, func | (ref & 0xff) << 8 | 0xff << 16);
 }
 static void st_depth_func(int func)
 {
@@ -2170,10 +2140,7 @@ static void st_depth_func(int func)
             return;
         gs.depth_func_known = 1, gs.depth_func = func;
     }
-    if (p4_ge_raw)
-        ge_word(0xDE, func);
-    else
-        sceGuDepthFunc(func);
+    ge_word(0xDE, func);
 }
 static void st_depth_mask(int mask)
 {
@@ -2184,10 +2151,7 @@ static void st_depth_mask(int mask)
             return;
         gs.depth_mask_known = 1, gs.depth_mask = mask;
     }
-    if (p4_ge_raw)
-        ge_word(0xE7, mask);
-    else
-        sceGuDepthMask(mask);
+    ge_word(0xE7, mask);
 }
 static void st_pixel_mask(unsigned mask)
 {
@@ -2196,11 +2160,8 @@ static void st_pixel_mask(unsigned mask)
             return;
         gs.pixel_known = 1, gs.pixel = mask;
     }
-    if (p4_ge_raw) {
-        ge_word(0xE8, mask);
-        ge_word(0xE9, mask >> 24);
-    } else
-        sceGuPixelMask(mask);
+    ge_word(0xE8, mask);
+    ge_word(0xE9, mask >> 24);
 }
 /* sceGuDrawArray without its stall-address syscall; mesh mode updates the stall every p4_draw_batch draws */
 static unsigned mesh_draw_calls, mesh_draw_vertices;
@@ -2246,12 +2207,6 @@ static void work_words(const unsigned *w, const unsigned *end)
             work_draw(vtype, arg & 0xffff, iaddr ? (const void *)iaddr : 0);
     }
 }
-/* b250 p4_strip_prims: the indices of this draw are draw_strip_n strips of draw_strip_lens[] indices, one after the
-   other. The first PRIM carries the addresses; each further PRIM word draws the next strip, because the GE leaves
-   the index address behind the last index it read [public: PPSSPP GPUCommon, AdvanceVerts]. Set by draw_skinned_ge
-   around draw_tested, so both alpha-test passes draw the same strips. */
-static const unsigned short *draw_strip_lens;
-static int draw_strip_n;
 /* b418: indexed vs flat draws by the site that issued them, per 256 frames (the "draw sites" line) */
 enum { DS_OTHER, DS_MESH, DS_IREC, DS_IPLAY, DS_SLREC, DS_SLPLAY, DS_SKIN, DS_ENV, DS_IM3D, DS_FX, DS_N };
 static int draw_site;
@@ -2273,82 +2228,12 @@ int p4_flat_all = 0;
 static unsigned flat_all_draws, flat_all_vertices, flat_all_full;
 static int sl_recording, sk_recording;
 static int flat_hold; /* a GeCall record (p4_mesh_call, p4_skin_call) is being made: its words are CALLed in later frames */
-int p4_chain_strips = 0, p4_compact_immediate = 0;
-int p4_state_call = 0;
-static unsigned strip_chained, compact_2d_vertices, compact_3d_vertices, state_call_hits;
-static struct {
-    unsigned strip_format, strip_recording, strip_commands, strip_address;
-    unsigned state_recording, state_size, state_alloc, state_new, state_full;
-    unsigned ui_format, ui_recording, ui_room, ui_range, ui_fraction;
-    unsigned im3d_recording, im3d_room, im3d_range, im3d_float_uv;
-} ge_refused;
-
-static int ge_experiment_recording(void)
-{
-    /* gate_close reserves one SDK stack level to suppress stall updates. */
-    return sl_recording || sk_recording || flat_hold || gu_object_stack_depth > (gate_closed != 0);
-}
-
 static int compact_room(unsigned bytes)
 {
     unsigned used = (((unsigned)gu_list->current & ~0x40000000u) - ((unsigned)list & ~0x40000000u)) / 4;
     return used < LIST_WORDS - LIST_RESERVE && bytes / 4 <= LIST_WORDS - LIST_RESERVE - used;
 }
 
-static unsigned *state_call_begin(void)
-{
-    if (!p4_state_call)
-        return 0;
-    if (ge_experiment_recording()) {
-        ge_refused.state_recording++;
-        return 0;
-    }
-    return gu_list->current;
-}
-
-static void state_call_end(unsigned *from)
-{
-    enum { SLOTS = 64, WORDS = 40 };
-    typedef struct { unsigned count, hash, words[WORDS + 1]; } StateBlock;
-    static StateBlock *blocks;
-    if (!from)
-        return;
-    unsigned n = gu_list->current - from;
-    if (n < 4 || n > WORDS) {
-        ge_refused.state_size++;
-        return;
-    }
-    if (!blocks && !(blocks = memalign(64, SLOTS * sizeof *blocks))) {
-        ge_refused.state_alloc++;
-        return;
-    }
-    static unsigned used;
-    unsigned hash = 2166136261u;
-    for (unsigned i = 0; i < n; i++)
-        hash = (hash ^ from[i]) * 16777619u;
-    for (unsigned i = 0; i < used; i++) {
-        StateBlock *b = blocks + i;
-        if (b->hash == hash && b->count == n && !memcmp(b->words, from, n * sizeof *from)) {
-            unsigned addr = (unsigned)b->words;
-            gu_list->current = from;
-            ge_word(0x10, addr >> 8 & 0xf0000);
-            ge_word(0x0A, addr);
-            state_call_hits++;
-            return;
-        }
-    }
-    /* Keep CALL targets immutable while queued lists can still refer to them. */
-    if (used < SLOTS) {
-        StateBlock *b = blocks + used++;
-        b->count = n;
-        b->hash = hash;
-        memcpy(b->words, from, n * sizeof *from);
-        b->words[n] = 0x0B000000;
-        sceKernelDcacheWritebackRange(b->words, (n + 1) * sizeof *from);
-        ge_refused.state_new++;
-    } else
-        ge_refused.state_full++;
-}
 static int vt_stride(unsigned vt)
 {
     static const unsigned char es[4] = { 0, 1, 2, 4 };
@@ -2369,26 +2254,9 @@ static void flat_report(void)
     if (p4_flat_all)
         p4_log("flat all: draws %u vertices %u, kept indexed for room %u per 256 frames\n", flat_all_draws, flat_all_vertices, flat_all_full);
     flat_all_draws = flat_all_vertices = flat_all_full = 0;
-    if (p4_chain_strips || p4_compact_immediate || p4_state_call)
-        p4_log("GE experiments: strips chained %u, packed 2D %u 3D %u vertices, state CALL hits %u\n",
-               strip_chained, compact_2d_vertices, compact_3d_vertices, state_call_hits);
-    if (p4_chain_strips)
-        p4_log("GE strip fallback: format %u recording %u command gap %u address/type %u\n",
-               ge_refused.strip_format, ge_refused.strip_recording, ge_refused.strip_commands, ge_refused.strip_address);
-    if (p4_state_call)
-        p4_log("GE state inline: recording %u size %u alloc %u first seen %u full %u\n",
-               ge_refused.state_recording, ge_refused.state_size, ge_refused.state_alloc, ge_refused.state_new, ge_refused.state_full);
-    if (p4_compact_immediate) {
-        p4_log("GE compact 2D fallback: format %u recording %u room %u range %u fractional %u\n",
-               ge_refused.ui_format, ge_refused.ui_recording, ge_refused.ui_room, ge_refused.ui_range, ge_refused.ui_fraction);
-        p4_log("GE compact Im3D fallback: recording %u room %u range %u float UV %u\n",
-               ge_refused.im3d_recording, ge_refused.im3d_room, ge_refused.im3d_range, ge_refused.im3d_float_uv);
-    }
-    memset(&ge_refused, 0, sizeof ge_refused);
-    strip_chained = compact_2d_vertices = compact_3d_vertices = state_call_hits = 0;
 }
 
-/* b431 census: the state calls that still reach libpspgu (outside p4_ge_raw), per frame, to decide whether the 2D
+/* b431 census: the state calls that still reach libpspgu (outside the raw GE words), per frame, to decide whether the 2D
    path's sceGuEnable/Disable and friends are worth moving onto st_enable. HW debug builds only: psp_hw_debug.py
    wraps these names, the normal and release links do not. Enable/Disable are also counted by state. */
 #ifdef P4_HW_PROFILE
@@ -2429,50 +2297,24 @@ static void gu_census_report(void) {}
 
 static unsigned *draw_address(unsigned *at, int prim, unsigned type, int count, const void *indices, const void *vertices)
 {
-    static unsigned next_vertex, last_type, last_prim;
-    int strip = 0, chain = 0;
     unsigned address = (unsigned)vertices;
-    if (p4_chain_strips && prim == GU_TRIANGLE_STRIP) {
-        if (!type || (type & (GU_INDEX_BITS | GU_VERTICES_BITS)) || indices || !vertices || count <= 0 || count > 65535)
-            ge_refused.strip_format++;
-        else if (ge_experiment_recording())
-            ge_refused.strip_recording++;
-        else {
-            strip = 1;
-            if (strip_tail != at || at[-1] != last_prim)
-                ge_refused.strip_commands++;
-            else if (next_vertex != address || last_type != type)
-                ge_refused.strip_address++;
-            else
-                chain = 1;
-        }
+    if (type)
+        *at++ = 0x12u << 24 | (type & 0xffffff);
+    if (indices) {
+        *at++ = 0x10u << 24 | ((unsigned)indices >> 8 & 0xf0000);
+        *at++ = 0x02u << 24 | ((unsigned)indices & 0xffffff);
     }
-    if (chain) {
-        strip_chained++;
-    } else {
-        if (type)
-            *at++ = 0x12u << 24 | (type & 0xffffff);
-        if (indices) {
-            *at++ = 0x10u << 24 | ((unsigned)indices >> 8 & 0xf0000);
-            *at++ = 0x02u << 24 | ((unsigned)indices & 0xffffff);
-        }
-        if (vertices) {
-            *at++ = 0x10u << 24 | (address >> 8 & 0xf0000);
-            *at++ = 0x01u << 24 | (address & 0xffffff);
-        }
+    if (vertices) {
+        *at++ = 0x10u << 24 | (address >> 8 & 0xf0000);
+        *at++ = 0x01u << 24 | (address & 0xffffff);
     }
-    last_prim = 0x04u << 24 | (((unsigned)prim << 16 | count) & 0xffffff);
-    *at++ = last_prim;
-    strip_tail = strip ? at : 0;
-    if (strip)
-        next_vertex = address + count * vt_stride(type), last_type = type;
+    *at++ = 0x04u << 24 | (((unsigned)prim << 16 | count) & 0xffffff);
     return at;
 }
 
 static const unsigned *draw_static_template;
 static void gu_draw(int prim, int vtype, int count, const void *indices, const void *vertices)
 {
-    int more = draw_strip_n > 1 && indices ? draw_strip_n - 1 : 0; /* strips: count is every strip's indices */
     static unsigned caller_vtype; /* the format the callers set (a second pass sends 0), not the flat one sent for it */
     if (vtype)
         caller_vtype = vtype;
@@ -2515,84 +2357,25 @@ static void gu_draw(int prim, int vtype, int count, const void *indices, const v
         unsigned at = (unsigned)draw_static_template;
         *gu_list->current++ = 0x10000000u | (at >> 8 & 0xf0000);
         *gu_list->current++ = 0x0a000000u | (at & 0xffffff);
-        strip_tail = 0;
         if (++draws_since_stall >= (unsigned)p4_draw_batch && !gu_object_stack_depth)
             stall_flush();
         return;
     }
-    if (more)
-        count = draw_strip_lens[0];
     if (!gu_mesh_mode || p4_draw_batch <= 1) {
         sceGuDrawArray(prim, vtype, count, indices, vertices);
-        for (int k = 1; k <= more; k++)
-            *gu_list->current++ = 0x04u << 24 | (((unsigned)prim << 16 | draw_strip_lens[k]) & 0xffffff);
         return;
     }
-    unsigned *c = draw_address(gu_list->current, prim, vtype, count, indices, vertices);
-    for (int k = 1; k <= more; k++)
-        *c++ = 0x04u << 24 | (((unsigned)prim << 16 | draw_strip_lens[k]) & 0xffffff);
-    gu_list->current = c;
+    gu_list->current = draw_address(gu_list->current, prim, vtype, count, indices, vertices);
     if (++draws_since_stall >= (unsigned)p4_draw_batch && !gu_object_stack_depth)
         stall_flush();
 }
 
 /* b365: every sceGuDrawArray (2D, particles, clouds, capsule shadows, libpspgu's own sceGuClear) linked through here
    (--wrap): the same words, but the stall address moves every p4_draw_batch draws through stall_flush (and the gate)
-   instead of a sceGeListUpdateStallAddr syscall per draw. p4_ge_raw 0: libpspgu's. */
-void __real_sceGuDrawArray(int prim, int vtype, int count, const void *indices, const void *vertices);
-typedef struct { unsigned short u, v; unsigned colour; short x, y; unsigned short z, pad; } Compact2D;
-static Compact2D *compact_2d(const Vertex3D *vertices, int count)
-{
-    if (!compact_room(count * sizeof(Compact2D) + 16)) {
-        ge_refused.ui_room++;
-        return 0;
-    }
-    for (int i = 0; i < count; i++) {
-        const Vertex3D *v = vertices + i;
-        if (!(v->u >= 0 && v->u <= 65535 && v->v >= 0 && v->v <= 65535 &&
-              v->x >= -32768 && v->x <= 32767 && v->y >= -32768 && v->y <= 32767 && v->z >= 0 && v->z <= 65535)) {
-            ge_refused.ui_range++;
-            return 0;
-        }
-        if (v->u != (int)v->u || v->v != (int)v->v || v->x != (int)v->x || v->y != (int)v->y || v->z != (int)v->z) {
-            ge_refused.ui_fraction++;
-            return 0;
-        }
-    }
-    Compact2D *out = sceGuGetMemory(count * sizeof *out);
-    for (int i = 0; i < count; i++) {
-        const Vertex3D *v = vertices + i;
-        out[i] = (Compact2D){v->u, v->v, v->colour, v->x, v->y, v->z, 0};
-    }
-    return out;
-}
-
+   instead of a sceGeListUpdateStallAddr syscall per draw. */
 void __wrap_sceGuDrawArray(int prim, int vtype, int count, const void *indices, const void *vertices)
 {
-    if (!p4_ge_raw) {
-        __real_sceGuDrawArray(prim, vtype, count, indices, vertices);
-        return;
-    }
-    int original_type = 0;
-    if (p4_compact_immediate && (vtype & GU_TRANSFORM_2D)) {
-        if (vtype != (GU_TRANSFORM_2D | GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF) ||
-            indices || !vertices || count <= 0 || count > 65535)
-            ge_refused.ui_format++;
-        else if (ge_experiment_recording())
-            ge_refused.ui_recording++;
-        else {
-            Compact2D *packed = compact_2d(vertices, count);
-            if (packed) {
-                original_type = vtype;
-                vtype = GU_TRANSFORM_2D | GU_TEXTURE_16BIT | GU_COLOR_8888 | GU_VERTEX_16BIT;
-                vertices = packed;
-                compact_2d_vertices += count;
-            }
-        }
-    }
     gu_list->current = draw_address(gu_list->current, prim, vtype, count, indices, vertices);
-    if (original_type)
-        ge_word(0x12, original_type);
     if (++draws_since_stall >= (unsigned)p4_draw_batch && !gu_object_stack_depth)
         stall_flush();
 }
@@ -2751,13 +2534,8 @@ static void bind_mask_mode(unsigned alpha, int fragment_alpha)
             return;
         if (gu_mesh_mode)
             gs.stencil_known = 1, gs.stencil_ref = alpha;
-        if (p4_ge_raw) { /* b366: STST, SOP as libpspgu writes them */
-            ge_word(0xDC, GU_ALWAYS | (alpha & 0xff) << 8 | 0xff << 16);
-            ge_word(0xDD, GU_KEEP | GU_KEEP << 8 | GU_REPLACE << 16);
-        } else {
-            sceGuStencilFunc(GU_ALWAYS, alpha, 0xff);
-            sceGuStencilOp(GU_KEEP, GU_KEEP, GU_REPLACE);
-        }
+        ge_word(0xDC, GU_ALWAYS | (alpha & 0xff) << 8 | 0xff << 16); /* b366: STST, SOP as libpspgu writes them */
+        ge_word(0xDD, GU_KEEP | GU_KEEP << 8 | GU_REPLACE << 16);
     } else {
         st_enable(GU_STENCIL_TEST, 0);
     }
@@ -3402,7 +3180,6 @@ static void cover_report(unsigned frames)
 static void ib_boundary(void) { ib_before(0); }
 static int wd_watch; /* b453 world_direct.h: the body's list call is being learned */
 static void wd_note(const void *e, const unsigned *list, unsigned draws, const Matrix *model, const void *normals, int memo);
-static void wd_note_gate(const void *e, const Matrix *model, const void *normals);
 #include "static_list.h"
 
 /* AtomicDefaultRenderCallBack */
@@ -3584,12 +3361,9 @@ static void matfx_env_pass(const Geometry *g, const V3 *positions, const V3 *nor
         gs.blend_known = 0;
         void **texture = *(void ***)(e + 4);
         bind_raster(*texture, GU_REPEAT);
-        int strips = draw_strip_n;
-        draw_strip_n = 0;
         draw_site = DS_ENV;
         gu_draw(prim, VT_3D, mesh->numIndices, mesh->indices, v);
         draw_site = DS_OTHER;
-        draw_strip_n = strips;
         matfx_env_draws++;
         matfx_env_vertices += count;
     }
@@ -4013,54 +3787,7 @@ static void im3d_draw(const unsigned *stash)
     }
     draw_site = DS_IM3D;
     int vtype = idx ? VT_3D : VT_3D & ~GU_INDEX_BITS;
-    const void *draw_vertices = out;
-    float scale = 0, decode[4];
-    int pack = 0;
-    if (p4_compact_immediate) {
-        if (ge_experiment_recording())
-            ge_refused.im3d_recording++;
-        else if (!compact_room(count * 20 + 16))
-            ge_refused.im3d_room++;
-        else
-            pack = 1;
-    }
-    if (pack) {
-        float bound = 1.0f / 1048576;
-        for (unsigned i = 0; i < count; i++)
-            bound = fmaxf(bound, fmaxf(fabsf(out[i].x), fmaxf(fabsf(out[i].y), fabsf(out[i].z))));
-        scale = static_position_scale(out, count, 12, bound);
-        if (scale) {
-            int uv = compact_room(count * 36 + 32) && static_uv_params(out, count, sizeof *out, decode);
-            const void *source = out;
-            if (uv) {
-                void *packed_uv = sceGuGetMemory(count * 20);
-                static_uv_copy(out, count, sizeof *out, packed_uv, decode);
-                source = packed_uv;
-            }
-            int head = uv ? 8 : 12;
-            void *packed = sceGuGetMemory(count * (head + 8));
-            static_position_copy(packed, source, count, scale, head);
-            Matrix m = translucent_model;
-            m.right.x *= scale; m.right.y *= scale; m.right.z *= scale;
-            m.up.x *= scale; m.up.y *= scale; m.up.z *= scale;
-            m.at.x *= scale; m.at.y *= scale; m.at.z *= scale;
-            set_matrix(GU_MODEL, &m);
-            if (uv) {
-                bind_texscale(decode);
-                vtype = (vtype & ~GU_TEXTURE_BITS) | GU_TEXTURE_16BIT;
-            } else
-                ge_refused.im3d_float_uv++;
-            vtype = (vtype & ~GU_VERTEX_BITS) | GU_VERTEX_16BIT;
-            draw_vertices = packed;
-            compact_3d_vertices += count;
-        } else
-            ge_refused.im3d_range++;
-    }
-    draw_tested(prims[type], vtype, n, idx, draw_vertices);
-    if (scale) {
-        set_matrix(GU_MODEL, &translucent_model);
-        bind_texscale(0);
-    }
+    draw_tested(prims[type], vtype, n, idx, out);
     draw_site = DS_OTHER;
     if (cull_cards)
         st_enable(GU_CULL_FACE, 0);

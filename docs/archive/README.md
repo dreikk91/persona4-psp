@@ -8,3 +8,5 @@ current plan; see [perf_status.md](../perf_status.md) for that.
 - [next_steps_b112.md](next_steps_b112.md) - measurements and plan after b112 (2026-11-06)
 - [build_validation_b164.md](build_validation_b164.md) - clean source-build check (2026-11-08)
 - [source_build_validation_b164.md](source_build_validation_b164.md) - source-build preparer check (2026-11-08)
+- [runtime_controls_b366.md](runtime_controls_b366.md) - the 230 runtime controls of b366 (2026-11-17); current list: [runtime_controls.md](../runtime_controls.md)
+- [build_validation_b249.md](build_validation_b249.md), [b450](build_validation_b450.md), [b494](build_validation_b494.md), [b495](build_validation_b495.md) - release validation records of those builds

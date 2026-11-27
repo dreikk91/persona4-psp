@@ -41,10 +41,10 @@ remains enabled. The source-build ZIP includes this correction.
 
 The diagnostic b249 PRX passed one Heaven save -> more than ten minutes with sound
 -> title-return movie -> resumed sound run on a PSP at 333 MHz. See
-[the audio/video record](audio_video_hang.md) for timing, errors and log filenames.
+[the audio/video record](../audio_video_hang.md) for timing, errors and log filenames.
 That result does not validate the utility's generated XMB EBOOT or a complete
 playthrough. The current screen-size culling default can make distant characters
-appear late; see [performance status](perf_status.md).
+appear late; see [performance status](../perf_status.md).
 
 ## Artifact identity
 

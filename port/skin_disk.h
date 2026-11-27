@@ -3,9 +3,8 @@
    few ms). Files skin/<key>.bin in the game folder. The key hashes everything the build reads: bind positions,
    normals, UVs, prelight, bone indices and weights, skinToBone, each mesh's indices, material colour and texture
    opacity, the bone count, lit/nrm, sample (skin_geometry's vertex hash XOR the build switches: sticky, regroup,
-   pack, palette, strip, strip_pack, strip_prims, wsplit, nocolour, flat, mesh_override), p4_mesh_strip_pack (not
-   in sample: whether a group's strip comes from p4strips.bin; both draw the same triangles, but an A/B of it must
-   not read the other mode's entries), p4_alpha_x2 (double_colour), the struct sizes and
+   pack, palette, strip, strip_pack, wsplit, nocolour, flat, mesh_override), a zero word (b528: was
+   p4_mesh_strip_pack), p4_alpha_x2 (double_colour), the struct sizes and
    P4_SKIN_CODE: b515, a hash of the code the entry comes from (tools/psp_link.py skin_code_hash: skin.h,
    skin_disk.h, mesh.h's double_colour and normal_s8), so the files outlive builds that leave skinning alone (b514
    keyed the build number: every EBOOT built every character again).
@@ -48,7 +47,7 @@ static void skin_disk_key(const Geometry *g, const Skin *skin, int nbones, int l
     int nv = g->numVertices, nb = nbones < skin->numBones ? nbones : skin->numBones;
     unsigned h[2] = { 2166136261u, 5381 };
     unsigned head[13] = { SKIN_DISK_VERSION, skin_disk_code(), sizeof(SkinBatch), sizeof(SkinGroup), (unsigned)p4_alpha_x2,
-                          (unsigned)p4_mesh_strip_pack, (unsigned)nv, (unsigned)nbones, (unsigned)lit, (unsigned)nrm, sample,
+                          0u, (unsigned)nv, (unsigned)nbones, (unsigned)lit, (unsigned)nrm, sample,
                          (unsigned)skin->maxWeights, (unsigned)g->numTexCoordSets };
     skin_disk_hash(h, head, sizeof head);
     skin_disk_hash(h, g->morphTarget->verts, nv * sizeof(V3));
@@ -238,7 +237,7 @@ static int skin_disk_read(SkinGeometry *e, const unsigned key[2], int nbones)
             break;
         memcpy(k, in, sizeof *k);
         int groups = k->ngroups;
-        k->v = 0, k->idx = k->src = k->strip = k->strip_lens = 0, k->grp = 0, k->ngroups = 0;
+        k->v = 0, k->idx = k->src = k->strip = 0, k->grp = 0, k->ngroups = 0;
         memset(k->call, 0, sizeof k->call);
         e->batches = b + 1; /* skin_free sees what is there so far */
         if (!(ok = groups > 0 && groups < 64))

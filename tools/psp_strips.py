@@ -4,7 +4,7 @@
 The PSP's GE transforms a vertex for every index it reads, so a skinned batch costs by its index count. The port
 builds each batch's strip on the PSP (greedy, no swaps: ~2.33 indices a triangle, ~0.24 s when a party appears).
 This tool does the same work on the PC with a better stripifier and writes the result where port/rwsky.c looks it
-up by the batch's own index list (p4_strip_pack 1). Nothing is made, moved or dropped: a strip is kept only when it
+up by the batch's own index list (port/skin.h). Nothing is made, moved or dropped: a strip is kept only when it
 unrolls to exactly the batch's triangles with their winding, and the PSP checks that again before it uses one.
 
   python tools/psp_strips.py                       # every skinned geometry of the ISO -> build/psp_dist/.../p4strips.bin
@@ -19,7 +19,7 @@ FNV-1a hash of its list. A batch the PSP cuts differently is simply not found an
 
 File: 'P4SP' 1 count data_offset, count x (key, corners, offset) sorted by key then corners, then per batch
 u16 strips, u16 total, u16 length[strips], u16 index[total], padded to 4 bytes. The strips are in the order and
-direction that joins them cheapest; port/strippack.h joins them (or draws them one PRIM each, p4_strip_prims 1).
+direction that joins them cheapest; port/strippack.h joins them.
 """
 import argparse
 import collections

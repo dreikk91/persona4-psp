@@ -161,7 +161,7 @@ static int static_pack_try(StaticList *e, const Geometry *g, const Matrix *model
     if (g->locked) { static_pack_drop(e); return 0; }
     if (!p4_static_pack || g->locked || g->numMorphTargets != 1 || g->numVertices < 1 || g->numVertices > 65535 ||
         !g->mesh->numMeshes || g->mesh->numMeshes > 32 || (g->flags & GEOMETRY_NATIVE) || p4_alpha_x2 ||
-        p4_ge_split || p4_static_gate || p4_static_chunk || !static_pack_load_index()) return 0;
+        !static_pack_load_index()) return 0;
     StaticPackRef *r = static_pack_bind(e, g, normals);
     if (!r || !r->bytes) return 0;
     const P4StaticHeader *h = (const void *)((const char *)r + ((sizeof *r + 15) & ~15u));
@@ -180,7 +180,7 @@ static int static_pack_try(StaticList *e, const Geometry *g, const Matrix *model
     int verdict = P4ST_INSIDE;
     float near = *(const float *)((const char *)current_camera + CAMERA_NEAR);
     if (world) {
-        if (*(const int *)((const char *)current_camera + CAMERA_PROJECTION) == 2 || p4_guard_snap > 0) return 0;
+        if (*(const int *)((const char *)current_camera + CAMERA_PROJECTION) == 2) return 0;
         Mat4 projection;
         guard_matrix_cached(projection, model);
         verdict = p4_static_screen(h->lo, h->hi, projection, near, GUARD, 0, p4_static_near);

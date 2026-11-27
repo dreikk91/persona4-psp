@@ -65,7 +65,7 @@ int p4_shadow_lookat_on(void) { return p4_shadow_lookat || p4_shadow_capsule; }
 /* b403, the field shadow camera (Junes, Living Room: a 128x128 camera texture with the characters' silhouettes,
    blended over the floor by a quad; PSP b400 Junes: 2 characters 2.4 ms, 7 props 3.0 ms of our drawing a frame).
    p4_shadow_lod: characters drawn into a camera texture from simplified geometry; 1 keeps p4_shadow_keep % of the
-   triangles (the bones stay), 2 also only p4_skin_far_bones bones. 0: full, as on the screen.
+   triangles (the bones stay), 2 also only SKIN_FEW_BONES bones. 0: full, as on the screen.
    p4_shadow_props 0: props (unskinned atomics) are not drawn into camera textures at all: no prop shadows (a look
    change, for A/B; b327's p4_probe_flags 64 did the same as a diagnostic). */
 int p4_shadow_lod = 0, p4_shadow_keep = 40, p4_shadow_props = 1;
@@ -352,7 +352,7 @@ static const V3 *skin_vertices_body(const Geometry *g, const Skin *skin, const H
 int p4_ge_skin = 1; /* 0: every skinned atomic on the CPU, as b76 */
 /* b390 p4_skin_wsplit: a batch's triangles drawn in groups by the weights they need (SkinGroup, skin_wsplit) */
 typedef struct { int vtype, count, prim, nocol; unsigned colour; unsigned char *v; unsigned short *idx; } SkinGroup;
-typedef struct { int mesh, bones, vtype, indices, vertices, wreal, rigid, strip_count, strip_n; unsigned char palette[8]; unsigned char *v; unsigned short *idx, *src, *strip, *strip_lens; int alpha[2]; GeCall call[2]; float uvs[4]; int ngroups, wslotv; SkinGroup *grp; } SkinBatch;
+typedef struct { int mesh, bones, vtype, indices, vertices, wreal, rigid, strip_count; unsigned char palette[8]; unsigned char *v; unsigned short *idx, *src, *strip; int alpha[2]; GeCall call[2]; float uvs[4]; int ngroups, wslotv; SkinGroup *grp; } SkinBatch;
 typedef struct { const Geometry *g; const V3 *verts; int vertices, lit, nrm, batches, nradius, packed, nmap; unsigned sample, frame, bytes, used[8]; SkinBatch *batch; float *radius, *box; unsigned short regroup[8]; float pack[4]; unsigned char *bone_map; float *bone_len; void *list; } SkinGeometry;
 enum { SKIN_GEOMETRIES = 64, SKIN_PALETTE = 8 };
 static SkinGeometry *skin_cache; /* heap: .bss is full */
@@ -360,7 +360,6 @@ static SkinGeometry *skin_cache; /* heap: .bss is full */
    the vertices it carries. Each vertex is a weighted mean of its bones' images of it, each inside that bone's box, and
    the band is convex: every box inside means every vertex inside. b383 Velvet Room, Satan after a fusion: his blades
    made the spheres huge, every frame went to the CPU skin path (31 batches, ~12 ms) and nothing was ever cut. */
-int p4_skin_guard_box = 1;
 static unsigned skin_box_saved;
 unsigned skin_box_saved_count(void) { unsigned n = skin_box_saved; skin_box_saved = 0; return n; }
 static int skin_box_inside(float P[5][4], const Matrix *pose, const float *bx)
@@ -506,7 +505,7 @@ static void skin_free(SkinGeometry *e)
         SkinBatch *k = &e->batch[b];
         for (int i = 0; i < k->ngroups; i++)
             free(k->grp[i].v), free(k->grp[i].prim == GU_TRIANGLE_STRIP ? k->grp[i].idx : 0);
-        free(k->grp), free(k->v), free(k->src), free(k->strip), free(k->strip_lens);
+        free(k->grp), free(k->v), free(k->src), free(k->strip);
     }
     free(e->batch);
     free(e->radius);
@@ -523,16 +522,12 @@ static void skin_free(SkinGeometry *e)
    index). The GE then reads ~1 index a triangle, not 3 (b206: indices ~2.9x the vertices); whether it also
    transforms fewer vertices is the device's question. The strip is unrolled and compared with the list (same
    triangles, same winding) before it is kept; idx stays the list for the CPU paths and checks. In the cache key. */
-int p4_skin_strip = 1; /* b243: on again. b227-b229 hung at the battle start (flicker, black scene); b241 put the strip address and count into the recorded CALL key (a rebuilt geometry replayed a record pointing at a freed strip) and b242 went through the boss battle with strips on. One pass: repeat before calling it closed. */
 int p4_strip_why = 0, p4_strip_check = 0;
 /* b250 p4_strip_pack 1: a batch whose index list is in p4strips.bin takes its strips from there instead of building
    one (tools/psp_strips.py: swaps, both ends, several runs: ~1.8 indices a triangle joined against ~2.33, and no
    build time when a party appears). The file is only a hint: sp_same compares what the strips draw with the batch's
    list (same corners, same winding, same multiplicity) and a batch that is not found or fails takes skin_stripify.
-   p4_strip_prims 1: the strips of a found batch are not joined by zero-area triangles but drawn one PRIM each (the
-   GE goes on reading indices where the PRIM before stopped): ~1.5 indices a triangle, one command word a strip.
-   Both are in the skin cache key. Default 0 until measured on the device. */
-int p4_strip_pack = 1, p4_strip_prims = 0;
+   Always on; without p4strips.bin every batch takes skin_stripify. */
 #include "strippack.h"
 #include "paths.h"
 #define STRIP_PACK_FILE p4_path("p4strips.bin") /* b321: the launch folder */
@@ -1072,18 +1067,11 @@ static int skin_wsplit(SkinGeometry *e, SkinBatch *b)
         gr->prim = GU_TRIANGLES, gr->count = n, gr->nocol = nocol, gr->colour = first;
         gr->vtype = (b->vtype & ~GU_WEIGHTS_BITS & ~(nocol ? GU_COLOR_BITS : 0)) | GU_WEIGHTS(c);
         int strip_bytes = 0;
-        if (p4_skin_strip && n >= 6) {
+        if (n >= 6) {
             int cap = 6 * (n / 3) + 6;
             unsigned short *strip = malloc(cap * sizeof *strip);
             int sn = 0;
-            const unsigned short *entry = strip && p4_mesh_strip_pack && p4_strip_pack ? pack_entry(gr->idx, n) : 0;
-            if (entry) {
-                sn = sp_join(entry, strip, cap);
-                if (sn >= n || !sp_same(gr->idx, n, strip, sn, 0, 0, used))
-                    sn = 0;
-                skin_group_strip_hits += sn != 0;
-            }
-            if (!sn && strip)
+            if (strip)
                 sn = skin_stripify(gr->idx, n, strip, 0);
             if (sn && sn < n) {
                 gr->idx = strip, gr->prim = GU_TRIANGLE_STRIP, gr->count = sn;
@@ -1282,25 +1270,19 @@ static int skin_batch(SkinGeometry *e, int mesh, const unsigned char *palette, i
         e->bytes += ws, skin_ge_bytes += ws;
         return 1;
     }
-    if (p4_skin_strip && corners >= 6) {
-        int cap = 6 * (corners / 3) + 6, n = 0, ns = 0;
-        unsigned short *strip = malloc(cap * sizeof *strip), *lens = 0;
+    if (corners >= 6) {
+        int cap = 6 * (corners / 3) + 6, n = 0;
+        unsigned short *strip = malloc(cap * sizeof *strip);
         unsigned t0 = sceKernelGetSystemTimeLow();
-        if (strip && p4_strip_pack) { /* b250: the PC's strips for this very list, if the file has them and they check out */
+        if (strip) { /* b250: the PC's strips for this very list, if the file has them and they check out */
             const unsigned short *entry = pack_entry(b->idx, corners);
             if (entry) {
-                if (p4_strip_prims && entry[0] > 1) {
-                    lens = malloc(entry[0] * sizeof *lens);
-                    ns = lens ? sp_split(entry, strip, cap, lens, entry[0]) : 0;
-                    n = ns ? entry[1] : 0;
-                } else
-                    n = sp_join(entry, strip, cap);
-                if (n && n < corners && sp_same(b->idx, corners, strip, n, ns ? lens : 0, ns, used))
-                    pack_hits++, pack_prims += ns ? ns : 1;
+                n = sp_join(entry, strip, cap);
+                if (n && n < corners && sp_same(b->idx, corners, strip, n, 0, 0, used))
+                    pack_hits++, pack_prims++;
                 else {
                     pack_refused++;
-                    free(lens);
-                    lens = 0, n = ns = 0;
+                    n = 0;
                 }
             } else
                 pack_misses++;
@@ -1324,12 +1306,11 @@ static int skin_batch(SkinGeometry *e, int mesh, const unsigned char *palette, i
         }
         if (n && n < corners) {
             b->strip = strip, b->strip_count = n;
-            b->strip_lens = lens, b->strip_n = ns;
             sceKernelDcacheWritebackRange(b->strip, n * sizeof *b->strip);
             strip_batches++, strip_list_idx += corners, strip_idx += n;
             bytes += n * sizeof *b->strip;
         } else
-            free(strip), free(lens);
+            free(strip);
     }
     sceKernelDcacheWritebackRange(v, bytes - b->strip_count * (int)sizeof *b->strip);
     bytes += ws;
@@ -1494,8 +1475,6 @@ static void batch_stats_add(const SkinGeometry *e, int shadow, unsigned sent)
 void p4_batch_stats_report(void)
 {
     p4_log("skin batches sticky %d regroup %d regrouped batches built %u\n", p4_skin_sticky, p4_skin_regroup, skin_regrouped);
-    if (p4_mesh_strip_pack)
-        p4_log("offline strips: static hits %u indices saved %u, skin group hits %u\n", mesh_strip_hits, mesh_strip_saved, skin_group_strip_hits);
     if (p4_skin_wsplit || p4_skin_nocolour || p4_skin_flat) /* b390: built since the last line; weight slots x vertices before -> after */
         p4_log("skin wsplit %d nocolour %d flat %d batches %u groups %u bytes %u wslotv %u -> %u nocol groups %u flat groups %u\n",
                p4_skin_wsplit, p4_skin_nocolour, p4_skin_flat, ws_batches, ws_groups, ws_bytes, ws_before, ws_after, ws_nocol, ws_flat);
@@ -1521,11 +1500,11 @@ void p4_batch_stats_report(void)
     memset(batch_stats, 0, 2 * BS_N * sizeof *batch_stats);
 }
 
-/* b245 p4_skin_lod_depth D (clip w, 0 off), p4_skin_lod_keep K (percent of triangles): a skinned character whose root
-   was farther than D in the last frame is drawn from a second cache entry simplified to K% (meshkit, as
-   p4_skin_simplify, built once when it first goes far: 0.2-0.5 s for a party). It comes back to the full mesh below
-   0.9 D, so it does not flip at the edge. The user (2026-11-14): far characters and scenery may lose detail the PSP
-   screen does not show. In the dialogue the party stands at 650-1300; b211 found 60% visibly damaged up close. */
+/* A second cache entry simplified to skin_simplify_now % of the triangles (meshkit) and/or collapsed to skin_bones_now
+   weighted bones (bone_lod.h): p4_skin_simplify and p4_shadow_lod only. The distance LOD that used them (b245-b254,
+   p4_skin_lod_*, p4_skin_far_*) opened holes in faces and was removed in b525. Meshes under SKIN_SIMPLIFY_MIN
+   triangles stay whole (b306). */
+enum { SKIN_FEW_BONES = 8, SKIN_SIMPLIFY_MIN = 128 };
 static int skin_simplify_now; /* the percent this skin_geometry call builds and keys with */
 static int skin_bones_now; /* b254: 0, or the weighted bones a far entry keeps (bone_lod.h) */
 static const Hierarchy *skin_hierarchy_now; /* its parents, for the far entry */
@@ -1572,8 +1551,7 @@ static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbon
         return 0;
     const V3 *verts = g->morphTarget->verts;
     unsigned sample = hash_sample(2166136261u, verts, g->numVertices, sizeof *verts);
-    sample ^= (unsigned)(p4_skin_sticky | p4_skin_regroup << 1 | (p4_skin_pack != 0) << 3 | (unsigned)p4_skin_palette << 12 | (unsigned)p4_skin_strip << 16 | (unsigned)skin_simplify_now << 18 | (p4_mesh_override != 0) << 25 | (p4_strip_pack != 0) << 26 | (p4_strip_prims != 0) << 27 | (unsigned)p4_skin_wsplit << 28 | (unsigned)(p4_skin_nocolour != 0) << 30 | (unsigned)(p4_skin_flat != 0) << 31) * 0x9e3779b1u; /* b199: a switch poke builds the new shape */
-    sample ^= skin_simplify_now ? (unsigned)p4_skin_lod_min * 0xc2b2ae35u : 0;
+    sample ^= (unsigned)(p4_skin_sticky | p4_skin_regroup << 1 | (p4_skin_pack != 0) << 3 | (unsigned)p4_skin_palette << 12 | 1u << 16 | (unsigned)skin_simplify_now << 18 | (p4_mesh_override != 0) << 25 | 1u << 26 | (unsigned)p4_skin_wsplit << 28 | (unsigned)(p4_skin_nocolour != 0) << 30 | (unsigned)(p4_skin_flat != 0) << 31) * 0x9e3779b1u; /* b199: a switch poke builds the new shape */
     sample ^= (unsigned)skin_bones_now * 0x85ebca6bu; /* b254: the far entry is another shape */
     SkinGeometry *spare = 0;
     for (int i = 0; i < SKIN_GEOMETRIES; i++) {
@@ -1588,7 +1566,7 @@ static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbon
     if (!spare || g->numVertices > MAX_GUARDED || !mesh_scratch(g->numVertices))
         return 0;
     /* b241: with the pipeline the GE may still be drawing the previous frame, which read this entry's buffers */
-    if (p4_skin_free_wait && spare->g && cache_frame - spare->frame <= 1) {
+    if (spare->g && cache_frame - spare->frame <= 1) {
         pipe_texture_wait();
         skin_free_waits++;
     }
@@ -1693,7 +1671,7 @@ static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbon
     unsigned char held[SKIN_PALETTE];
     memset(held, 0xff, sizeof held);
     int *weld = 0; /* b210: each vertex -> the first vertex at the same position */
-    if (p4_skin_strip && p4_strip_why && g->numVertices > 0 && g->numVertices <= 65535 && (weld = malloc(g->numVertices * sizeof *weld))) {
+    if (p4_strip_why && g->numVertices > 0 && g->numVertices <= 65535 && (weld = malloc(g->numVertices * sizeof *weld))) {
         int *order = malloc(g->numVertices * sizeof *order);
         if (order) {
             for (int j = 0; j < g->numVertices; j++)
@@ -1799,7 +1777,7 @@ static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbon
                     mk_next += 4 + count * 6;
                 } else
                     mk_next = 0; /* not this geometry's file after all: the rest of it is ignored */
-            } else if (list && skin_simplify_now > 0 && skin_simplify_now < 100 && ntri >= 8 && ntri >= p4_skin_lod_min) {
+            } else if (list && skin_simplify_now > 0 && skin_simplify_now < 100 && ntri >= 8 && ntri >= SKIN_SIMPLIFY_MIN) {
                 unsigned t0 = sceKernelGetSystemTimeLow();
                 n = mk_simplify((const float (*)[3])verts, g->numVertices, 0, mk_group, list, ntri, ntri * skin_simplify_now / 100, INFINITY, 1 << 30, 0);
                 mk_us += sceKernelGetSystemTimeLow() - t0;
@@ -1818,7 +1796,7 @@ static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbon
             free(list);
         }
         int regroup = ok && skin_mesh_regroup(&mesh[m], g, corner, ntri);
-        if (ok && p4_skin_strip && p4_strip_why && ntri >= 2 && weld) { /* b210 strip diagnosis (b213: on request) */
+        if (ok && p4_strip_why && ntri >= 2 && weld) { /* b210 strip diagnosis (b213: on request) */
             unsigned short *list = malloc(ntri * 3 * sizeof *list), *out = malloc((6 * ntri + 6) * sizeof *out);
             if (list && out) {
                 if (strip)
@@ -2087,7 +2065,6 @@ static void skin_diff(const Geometry *g, const Skin *skin, const SkinGeometry *e
    on the CPU and the GE alike (p4_skin_diff: both INT_MAX) - by its look the game parks a hidden part of the model
    there. The CPU path's guard clipper drops those triangles; the GE drew them as large flat triangles from her hand
    and head. A bone whose matrix is not finite or is beyond 1e7 sends its batches through skin_batch_cpu. */
-int p4_skin_finite = 1; /* 0: as b179 */
 static int matrix_sane(const Matrix *m)
 {
     const float *f = &m->right.x;
@@ -2133,7 +2110,7 @@ static int skin_call_key(const SkinBatch *b, const Material *m, int modulate, co
     /* b241: a recorded draw holds the strip's address and count. Without them in the key, a geometry rebuilt at the
        same batch, vertex and list addresses (free then malloc of the same sizes, as when a battle loads) replayed
        the old record with the address of a strip that had been freed. */
-    w[n++] = (unsigned)b->strip, w[n++] = b->strip_count | b->strip_n << 16; /* b250: and how many PRIMs it was recorded as */
+    w[n++] = (unsigned)b->strip, w[n++] = b->strip_count;
     w[n++] = (unsigned)b->grp; /* b390: drawn as weight groups */
     call_key(w, n, h);
     return 1;
@@ -2340,9 +2317,7 @@ static void skin_env_ge(const unsigned char *e, const Material *material, int mo
     sceGuTexProjMapMode(GU_NORMALIZED_NORMAL);
     sceGuTexMapMode(GU_TEXTURE_MATRIX, 0, 0);
     if (batch->strip) {
-        draw_strip_lens = batch->strip_lens, draw_strip_n = batch->strip_n;
         gu_draw(GU_TRIANGLE_STRIP, batch->vtype, batch->strip_count, batch->strip, batch->v);
-        draw_strip_n = 0;
     } else
         gu_draw(GU_TRIANGLES, batch->vtype, batch->indices, batch->idx, batch->v);
     sceGuTexProjMapMode(GU_POSITION);
@@ -2437,36 +2412,16 @@ static int draw_skinned_ge(const Geometry *g, const Skin *skin, const Hierarchy 
     skin_simplify_now = p4_skin_simplify;
     skin_bones_now = 0;
     skin_hierarchy_now = hierarchy;
-    int far_on = p4_skin_far_depth > 0 && p4_skin_far_bones > 0 && p4_skin_far_keep > 0 && p4_skin_far_keep <= 100;
-    int near_on = p4_skin_lod_depth > 0 && p4_skin_lod_keep > 0 && p4_skin_lod_keep < 100;
-    if (near_on || far_on) {
-        AnimState *as = anim_find(hierarchy); /* its depth is the last frame's (anim_seen_at, below) */
-        if (as) {
-            /* 0 full, 1 simplified, 2 far (fewer bones too); back one level only below 0.9 of its edge */
-            int level = 0;
-            if (far_on && (as->depth > p4_skin_far_depth || (as->lod == 2 && as->depth > p4_skin_far_depth * 0.9f)))
-                level = 2;
-            else if (near_on && (as->depth > p4_skin_lod_depth || (as->lod >= 1 && as->depth > p4_skin_lod_depth * 0.9f)))
-                level = 1;
-            as->lod = level;
-            if (level == 2) {
-                skin_simplify_now = p4_skin_far_keep < 100 ? p4_skin_far_keep : 0;
-                skin_bones_now = p4_skin_far_bones;
-            } else if (level == 1)
-                skin_simplify_now = p4_skin_lod_keep;
-            skin_lod_draws += level == 1, skin_full_draws += level == 0, skin_far_draws += level == 2;
-        }
-    }
     if (rtt_target && p4_shadow_lod > 0) { /* b403: the field shadow's 128x128 silhouette from simplified geometry */
         skin_simplify_now = p4_shadow_keep > 0 && p4_shadow_keep < 100 ? p4_shadow_keep : 0;
-        skin_bones_now = p4_shadow_lod >= 2 ? p4_skin_far_bones : 0;
+        skin_bones_now = p4_shadow_lod >= 2 ? SKIN_FEW_BONES : 0;
         shadow_lod_draws++;
     }
     SkinGeometry *e = nbones > 0 ? skin_geometry(g, skin, nbones, lit, lit || env_ge) : 0;
     if (e && e->bone_map && !far_bones_sane(e, hierarchy, nbones)) {
         skin_far_fallbacks++;
         skin_bones_now = 0;
-        skin_simplify_now = p4_skin_lod_depth > 0 && p4_skin_lod_keep > 0 && p4_skin_lod_keep < 100 ? p4_skin_lod_keep : p4_skin_simplify;
+        skin_simplify_now = p4_skin_simplify;
         e = skin_geometry(g, skin, nbones, lit, lit || env_ge);
     }
     sb_bones_us += sb_t1 - sb_t0, sb_geom_us += sceKernelGetSystemTimeLow() - sb_t1, sb_draws++;
@@ -2509,7 +2464,7 @@ static int draw_skinned_ge(const Geometry *g, const Skin *skin, const Hierarchy 
     for (int i = 0; i < nbones; i++) {
         bone_out[i] = 0;
         bone_parked[i] = 0;
-        if (p4_skin_finite && !matrix_sane(&bones[i])) {
+        if (!matrix_sane(&bones[i])) {
             bone_parked[i] = 1;
             bones_parked = 1;
             bone_out[i] = 1; /* its vertices reach no sane place: the CPU batch path drops them, as the PS2's clipper did */
@@ -2523,7 +2478,7 @@ static int draw_skinned_ge(const Geometry *g, const Skin *skin, const Hierarchy 
         float scale = sqrtf(pose->right.x * pose->right.x + pose->right.y * pose->right.y + pose->right.z * pose->right.z);
         float sphere[4] = { pose->pos.x, pose->pos.y, pose->pos.z, e->radius[i] * (scale > 1 ? scale : 1) };
         int inside = p4_skin_guard_fast ? guard_sphere_inside_planes(planes, plane_len, sphere) : guard_sphere_inside(m, sphere, near);
-        if (!inside && p4_skin_guard_box && p4_skin_guard_fast && e->box) { /* b385: the bone's box, tighter than its sphere */
+        if (!inside && p4_skin_guard_fast && e->box) { /* b385: the bone's box, tighter than its sphere */
             inside = skin_box_inside(planes, pose, e->box + i * 6);
             skin_box_saved += inside;
         }
@@ -2716,11 +2671,8 @@ static int draw_skinned_ge(const Geometry *g, const Skin *skin, const Hierarchy 
             if (nocol)
                 ge_word(0x55, 0xffffff); /* as bind_ge_light_body leaves it */
         }
-        else if (batch->strip) {
-            draw_strip_lens = batch->strip_lens, draw_strip_n = batch->strip_n; /* b250: one PRIM a strip (gu_draw) */
+        else if (batch->strip)
             draw_tested(GU_TRIANGLE_STRIP, batch->vtype, batch->strip_count, batch->strip, batch->v);
-            draw_strip_n = 0;
-        }
         else
             draw_tested(GU_TRIANGLES, batch->vtype, batch->indices, batch->idx, batch->v);
         if (env_entry) {

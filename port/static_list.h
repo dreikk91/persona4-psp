@@ -19,69 +19,17 @@
    and the switches the draw path reads. Camera matrices and the model matrix are sent outside the list.
    Check (p4_static_list_check 1): every 64th frame a hit is recorded again and its words compared with the list's
    (vertex and index addresses aside); differences are logged and the new recording kept. */
-#include "ge_prepare.h"
-#include "static_position.h"
-int p4_static_position_pack = 1;
-static unsigned sl_position_vertices, sl_position_bytes;
 int p4_static_list = 1, p4_static_list_check = 0, p4_static_list_budget = 4 << 20;
 int p4_static_flat = 1; /* b400: on by the user's choice (the b396 Heaven-load crash is still open). b399: off. b393: sl_flatten. b397: on (PSP b396 Entrance: 67.2 -> 50.5 ms, CPU -15 ms, picture unchanged; +458 KB) */
 /* b402 p4_sl_rtt: static lists also while the game draws into a camera texture (the field shadow camera: PSP b400
    Junes, 7 props x 4 passes cost 3 ms on the general path). Their own entries, found by the atomic's address + 1, so
    a prop drawn into the shadow and onto the screen keeps two lists; rtt is in the key bits. */
 int p4_static_colour16 = 1; /* b411: see sl_flatten */
-int p4_ge_compile = 1; /* b445: on (b438 Heaven: lists ~40% smaller, picture unchanged) */
 float p4_ge_s8_step = 0.35f, p4_ge_s16_step = 2.0f;
 int p4_ge_strips = 1; /* b438: triangle lists of compiled static lists as strips (sl_compile). 0: as b437 */
-/* b441 p4_static_chunk N (triangles, 0 off): an atomic whose sphere crosses the guard band is drawn as parts of N
-   triangles of each mesh, each with its own sphere and its own prepared list. A part inside the band CALLs its list,
-   recorded once and never for a view; only a part that crosses goes through the CPU cut, and only its triangles.
-   Before, one crossing triangle sent the whole atomic the long way every frame and tied its list to the camera
-   (Heaven's cloud sea while running: ~9 ms). No triangles are added (p4_ge_split's cost). A part is recorded only
-   while it is inside. At most SL_CHUNK_PARTS parts per atomic: a bigger geometry takes bigger parts. */
-int p4_static_chunk = 0;
-enum { SL_CHUNK_PARTS = 96 };
-/* b442 p4_static_gate: an atomic that crosses the guard band keeps ONE prepared list of all its triangles, recorded
-   uncut once (off the screen: its words are taken back), with a gate before every chunk of SL_GATE_TRIS triangles of
-   each mesh: a NOP draws the chunk, a JUMP skips it. Each frame the CPU tests the chunks' spheres, opens the inside
-   ones, CALLs the list (three copies: the GE may still read the two frames before) and cuts only the closed chunks
-   on the CPU (gate_draw_mesh in mesh.h). The list never depends on the view, so running costs no recording. The
-   b441 profile (Heaven, running): the guard's own work ~9 ms, of it the cut 0.4 ms; the rest was the long path for
-   the inside triangles. 0: off. */
-int p4_static_gate = 0;
-enum { SL_GATE_TRIS = 32, SL_GATE_MAX = 768 };
-typedef struct { unsigned short mesh, first, count, word, after; float sphere[4]; } SlGate;
-/* b443: each mesh's compact copy (vertices, indices in the mesh's order) kept with the gated list, so the closed
-   chunks are cut straight from it: no body path (keys, hashes, cache lookups, state) for a crossing atomic */
-typedef struct { unsigned short mi; short prim; int vtype, nverts; void *v; unsigned short *idx; const Material *material; } SlGateMesh;
-typedef struct SlGates { int n, words, nmesh; unsigned *copy[3], seq[3]; unsigned char *cut; SlGateMesh *mesh; SlGate g[]; } SlGates;
-static int sl_gate_rec; /* recording a gated list: no strips (chunks keep the triangles' order) */
-static SlGates *sl_gate_cur;
-static unsigned sl_gate_lists, sl_gate_calls, sl_gate_open, sl_gate_closed, sl_gate_light, sl_gate_busy, sl_gate_why[5];
-static int sl_gate_ranges(int mesh, unsigned short *first, unsigned short *count, int max)
-{
-    const SlGates *gs = sl_gate_now;
-    int n = 0;
-    for (int i = 0; gs && i < gs->n; i++)
-        if (gs->cut[i] && gs->g[i].mesh == mesh) {
-            if (n && max && first[n - 1] + count[n - 1] >= gs->g[i].first && gs->g[i].first >= first[n - 1]) { /* adjacent: one range */
-                int end = gs->g[i].first + gs->g[i].count;
-                if (end > first[n - 1] + count[n - 1])
-                    count[n - 1] = end - first[n - 1];
-                continue;
-            }
-            if (max && n >= max)
-                break;
-            if (max)
-                first[n] = gs->g[i].first, count[n] = gs->g[i].count;
-            n++;
-        }
-    return n;
-}
 int p4_sl_rtt = 1; /* b404: on (PPSSPP Junes: shadow camera textures identical to off, alpha diff at the noise level) */
 static unsigned sl_rtt_hits;
 int p4_static_mesh_lists = 1; /* b264: independent lists/bounds per mesh; real-PSP battle A/B saves ~1 ms */
-int p4_ge_static_clip = 0, p4_ge_clip_growth = 256; /* b267: enable after real-PSP image/performance checks */
-static unsigned sl_ge_hits, sl_ge_fallbacks, sl_ge_builds, sl_ge_refused;
 enum { SL_SLOTS = 2048, /* b277: 512 (256 pairs) thrashed in Heaven: ~21 atomics a frame evicted each other, "new" forever */ SL_MESHES = 16, SL_GRAVE = 128, SL_PART = 32, SL_PARTS = 256 };
 typedef struct {
     const void *atomic;
@@ -91,12 +39,10 @@ typedef struct {
     int count, modulate, words, draws, bytes;
     unsigned *list;   /* own words + RET */
     void *data;       /* own copies of the mesh cache slots the words point into */
-    float position_scale; /* zero: float positions; otherwise exact s16 decode */
     float q_centre[3], q_scale; /* b436 p4_ge_compile: s8/s16 positions around this centre; q_scale 0: none */
     const void **tex; /* b439: the rasters the list binds (ntex), keyed by their own generations (texkey) */
     unsigned texkey;
     unsigned char ntex; /* 255: too many rasters, the global texture_generation decides as before */
-    struct SlGates *gates; /* b442: a gated list (p4_static_gate), three copies of its words */
     float (*parts)[4]; /* b259: spheres of up to SL_PART triangles (model space), for an atomic whose own sphere crosses the guard band */
     int nparts;
     int split;
@@ -112,11 +58,8 @@ typedef struct {
     MorphTarget target;
     struct { MeshHeader header; Mesh mesh; } draw;
     Mesh source;
-    void *prepared;
-    unsigned prepared_bytes;
-    float bounds[6], max_edge;
     StaticList entry;
-    unsigned short mi; /* b441: the source mesh (p4_static_chunk parts several per mesh) */
+    unsigned short mi; /* the source mesh */
 } SlMeshPart;
 typedef struct SlMeshSet {
     const Geometry *source;
@@ -124,7 +67,7 @@ typedef struct SlMeshSet {
     const void *verts, *uv, *prelit, *normals;
     unsigned flags, mesh_flags;
     int count, nverts, ge_mode;
-    int nmeshes, chunk; /* b441: the geometry's meshes; triangles per part (0: a part per mesh) */
+    int nmeshes;
     unsigned short serial;
     SlMeshPart part[];
 } SlMeshSet;
@@ -168,8 +111,6 @@ static void sl_note(MeshCache *slot)
    changes and recorded again once the camera is still. Same triangles, same words as the guarded draw.
    0: as b287 (such parts are refused, drawn the long way). */
 int p4_static_guard_lists = 1;
-int p4_sl_trust = 0; /* b297 experiment, see sl_draw */
-static unsigned sl_trusted;
 enum { SL_VIEW = 38, SL_EXTRA = 16 }; /* GuardResultKey model[12] camera[18] options[8], contiguous */
 static const void *sl_xp[SL_EXTRA];
 static unsigned sl_xb[SL_EXTRA];
@@ -275,10 +216,6 @@ static void sl_drop(StaticList *e)
     if (e->meshes) {
         for (int i = 0; i < e->meshes->count; i++) {
             sl_drop(&e->meshes->part[i].entry);
-            if (e->meshes->part[i].prepared) {
-                sl_bytes -= e->meshes->part[i].prepared_bytes;
-                sl_bury(e->meshes->part[i].prepared);
-            }
         }
         sl_bytes -= sizeof(SlMeshSet) + e->meshes->count * sizeof(SlMeshPart);
         free(e->meshes);
@@ -287,13 +224,6 @@ static void sl_drop(StaticList *e)
     free(e->parts), e->parts = 0, e->nparts = 0; /* CPU only */
     free(e->gview), e->gview = 0;
     free(e->tex), e->tex = 0, e->ntex = 0;
-    if (e->gates) { /* b442: copy 0 is e->list (buried below); the GE may still read the others */
-        sl_bury(e->gates->copy[1]), sl_bury(e->gates->copy[2]);
-        for (int i = 0; i < e->gates->nmesh; i++) /* CPU only: freed at once */
-            free(e->gates->mesh[i].v), free(e->gates->mesh[i].idx);
-        free(e->gates->mesh);
-        free(e->gates->cut), free(e->gates), e->gates = 0;
-    }
     if (e->list) {
         sl_bytes -= e->bytes;
         sl_bury(e->list), sl_bury(e->data);
@@ -360,8 +290,6 @@ P4_HOT static unsigned sl_material_key(const Geometry *g)
 static unsigned sl_fog_key(void);
 P4_HOT static unsigned sl_compile_key(void)
 {
-    if (!p4_ge_compile)
-        return 0;
     unsigned s8, s16;
     memcpy(&s8, &p4_ge_s8_step, sizeof s8);
     memcpy(&s16, &p4_ge_s16_step, sizeof s16);
@@ -371,7 +299,7 @@ P4_HOT static unsigned sl_compile_key(void)
 P4_HOT static unsigned sl_bits(void)
 {
     return state_bits() ^ (unsigned)p4_light_prelit << 20 ^ (unsigned)p4_light_unprelit << 21 ^ sl_fog_key() ^
-           (unsigned)p4_static_uv_pack * 0x9e3779b1u ^ (unsigned)p4_static_position_pack * 0x85ebca6bu ^
+           (unsigned)p4_static_uv_pack * 0x9e3779b1u ^
            (unsigned)p4_static_flat * 0xc2b2ae35u /* b393 */ ^ (unsigned)(rtt_target != 0) * 0x165667b1u /* b402 */ ^
            (unsigned)p4_static_colour16 * 0x27d4eb2fu ^ sl_compile_key();
 }
@@ -398,66 +326,6 @@ P4_HOT static StaticList *sl_find(const void *atomic)
 }
 /* the words of a GE address: BASE (bits 24-27) and the 24-bit low part */
 static inline unsigned sl_address(unsigned base, unsigned low) { return (base & 0xf0000) << 8 | (low & 0xffffff); }
-
-/* Bytes before the position in a UV-packed vertex: u16 UV + colour, and the s8 normal with its pad when lit. A uniform
-   decode scale in the model matrix also scales lit normals; the GE divides lighting by the normal's length (as the
-   packed skins since b205 rely on), so the light stays. */
-static int sl_position_head(int i) { return sl_slot[i]->vtype & GU_NORMAL_BITS ? 12 : 8; }
-/* Every mesh stream of the list, UV-packed: extra buffer i holds slot i's packed vertices (sl_note_uv appends them in
-   slot order). Guard-cut lists keep floats. The geometry's sphere gives the one grid all its meshes share
-   (static_position.h), so a single decode scale in the replayed model matrix serves the whole list. */
-/* Vertices of recorded lists that kept float positions, by reason: 0 guard-cut or GE-clipped list, 1 streams and
-   extra buffers do not pair up, 2 UVs not packed, 3 other commands (matrix, format, address), 4 outside the sphere. */
-static unsigned sl_position_why[5];
-static float sl_position_refuse(int why)
-{
-    unsigned n = 0;
-    for (int i = 0; i < sl_nslots && i < SL_MESHES; i++) n += sl_slot[i] ? sl_slot[i]->vertices : 0;
-    sl_position_why[why] += n;
-    return 0;
-}
-static float sl_position_candidate(const unsigned *from, const unsigned *to, const Geometry *geometry)
-{
-    if (!p4_static_position_pack || !geometry || !geometry->morphTarget) return 0;
-    if (sl_ge_uncut || sl_gview_set) return sl_position_refuse(0);
-    if (sl_nslots <= 0 || sl_nslots > SL_MESHES || sl_nextra != sl_nslots) return sl_position_refuse(1);
-    if (sl_uv_slots != (1u << sl_nslots) - 1) return sl_position_refuse(2); /* SL_MESHES 16 fits */
-    for (int i = 0; i < sl_nslots; i++)
-        if (sl_xb[i] != sl_slot[i]->vertices * (sl_position_head(i) + 12u) || (sl_slot[i]->vtype & GU_WEIGHT_BITS))
-            return sl_position_refuse(2);
-    unsigned base = 0;
-    int seen = 0;
-    for (const unsigned *w = from; w < to; w++) {
-        unsigned cmd = *w >> 24;
-        /* Additional WORLD matrix commands would override the replay's decode. */
-        if ((cmd == 0x3a || cmd == 0x3b) && (w < mesh_model_begin || w >= mesh_model_mark)) return sl_position_refuse(3);
-        if (cmd == 0x10) base = *w;
-        if (cmd == 0x12) { /* each format must be one of the packed streams' */
-            int ok = 0;
-            for (int i = 0; i < sl_nslots && !ok; i++)
-                ok = (*w & 0xffffff) == ((sl_slot[i]->vtype & ~GU_TEXTURE_BITS) | GU_TEXTURE_16BIT);
-            if (!ok) return sl_position_refuse(3);
-            seen = 1;
-        }
-        if (cmd == 0x01) { /* each vertex address must start one of the packed buffers */
-            int ok = 0;
-            for (int i = 0; i < sl_nslots && !ok; i++)
-                ok = sl_address(base, *w) == ((unsigned)sl_xp[i] & 0xfffffff);
-            if (!ok) return sl_position_refuse(3);
-        }
-    }
-    if (!seen) return sl_position_refuse(3);
-    const float *s = geometry->morphTarget->sphere;
-    float c = fabsf(s[0]) > fabsf(s[1]) ? fabsf(s[0]) : fabsf(s[1]);
-    if (fabsf(s[2]) > c) c = fabsf(s[2]);
-    float scale = 0;
-    for (int i = 0; i < sl_nslots; i++) {
-        float si = static_position_scale(sl_xp[i], sl_slot[i]->vertices, sl_position_head(i), c + s[3]);
-        if (!si || (scale && si != scale)) return sl_position_refuse(4);
-        scale = si;
-    }
-    return scale;
-}
 
 /* words from..to (the draw just made) into e; 0 refused (reason in sl_refused) */
 /* b393 p4_static_flat: a recorded list's draws without index lists, as b392's p4_skin_flat (PSP Margaret dialogue:
@@ -616,7 +484,6 @@ static char *sl_flatten(unsigned *list, int k, int *bytes)
    UVs (u16 where p4_static_uv_pack made them), normals and colour formats otherwise stay as recorded. Lists with
    indices, weights or morph targets stay as they are. 0: off (as b435). */
 static unsigned slc_lists, slc_s8, slc_s16, slc_plain, slc_in, slc_out;
-static unsigned sl_chunk_cut, sl_chunk_inside; /* b441 */
 static unsigned slc_rgba(unsigned format, const unsigned char *p) /* a vertex colour as GE 8888 */
 {
     if (format == 7)
@@ -897,7 +764,7 @@ static int sl_compile(float q_centre[3], float *q_scale, unsigned **plist, int *
                 }
                 fresh = 0;
             }
-            int strip = cmd == 0x04 && prim == GU_TRIANGLES && p4_ge_strips && !sl_gate_rec && count >= 6 && count % 3 == 0;
+            int strip = cmd == 0x04 && prim == GU_TRIANGLES && p4_ge_strips && count >= 6 && count % 3 == 0;
             if (strip && pass == 0) { /* quantize into scratch, find the strips, keep them for pass 1 */
                 char *q = malloc(count * nstride);
                 if (q) {
@@ -983,115 +850,6 @@ static int sl_compile(float q_centre[3], float *q_scale, unsigned **plist, int *
     return 1;
 }
 
-/* b442: the flattened (compiled, unstripped) list split at every SL_GATE_TRIS triangles of each mesh, a gate before
-   each chunk: BASE, NOP|JUMP (past the chunk), BASE, VADDR, PRIM. A PRIM must draw its mesh's whole index list in
-   order (two passes of one mesh are two runs of the same chunks). Three copies; copy 0 replaces *plist. */
-static SlGates *sl_gate_build(unsigned **plist, int *pk, const unsigned char *prim_mesh, int nprims, const Geometry *g)
-{
-    unsigned *list = *plist;
-    int k = *pk, strip = (g->mesh->flags & MESH_PRIM_MASK) == MESH_TRISTRIP, nm = g->mesh->numMeshes;
-    const Mesh *m = (const Mesh *)((const char *)g->mesh + sizeof(MeshHeader) + g->mesh->firstMeshOffset);
-    int chunks = 0, words = k, pi = 0;
-    for (int i = 0; i < k; i++)
-        if (list[i] >> 24 == 0x04) {
-            if (pi >= nprims)
-                return 0;
-            const Mesh *mm = &m[prim_mesh[pi++]];
-            int tris = strip ? mm->numIndices - 2 : mm->numIndices / 3, nc = tris > 0 ? (tris + SL_GATE_TRIS - 1) / SL_GATE_TRIS : 0;
-            if ((int)(list[i] & 0xffff) != mm->numIndices || !nc)
-                return 0;
-            chunks += nc, words += nc * 5 - 1;
-        }
-    if (pi != nprims || !chunks || chunks > SL_GATE_MAX || nm > 255)
-        return 0;
-    SlGates *gs = calloc(1, sizeof *gs + chunks * sizeof(SlGate));
-    unsigned *nl = memalign(16, (words + 1) * 4);
-    if (gs)
-        gs->cut = calloc(chunks, 1);
-    if (!gs || !nl || !gs->cut) {
-        if (gs) free(gs->cut);
-        free(gs), free(nl);
-        return 0;
-    }
-    unsigned vtype = 0, base = 0, addr = 0;
-    int n = 0, c = 0;
-    pi = 0;
-    for (int i = 0; i < k; i++) {
-        unsigned w = list[i], cmd = w >> 24;
-        if (cmd == 0x12) vtype = w & 0xffffff;
-        else if (cmd == 0x10) base = w;
-        else if (cmd == 0x01) addr = sl_address(base, w);
-        if (cmd != 0x04) {
-            nl[n++] = w;
-            if (cmd == 0x07) /* the box run advances VADDR too */
-                addr += (w & 0xffff) * gd_vertex_size(vtype);
-            continue;
-        }
-        int mi = prim_mesh[pi++], prim = w >> 16 & 7;
-        const Mesh *mm = &m[mi];
-        unsigned stride = gd_vertex_size(vtype);
-        int tris = strip ? mm->numIndices - 2 : mm->numIndices / 3;
-        for (int t0 = 0; t0 < tris; t0 += SL_GATE_TRIS, c++) {
-            int nt = tris - t0 < SL_GATE_TRIS ? tris - t0 : SL_GATE_TRIS;
-            int first = strip ? t0 : t0 * 3, count = strip ? nt + 2 : nt * 3;
-            SlGate *gt = &gs->g[c];
-            gt->mesh = mi, gt->first = first, gt->count = count;
-            float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
-            for (int j = first; j < first + count; j++) {
-                const V3 *p = &g->morphTarget->verts[mm->indices[j]];
-                float xyz[3] = { p->x, p->y, p->z };
-                for (int a = 0; a < 3; a++) {
-                    if (xyz[a] < lo[a]) lo[a] = xyz[a];
-                    if (xyz[a] > hi[a]) hi[a] = xyz[a];
-                }
-            }
-            float dx = hi[0] - lo[0], dy = hi[1] - lo[1], dz = hi[2] - lo[2];
-            for (int a = 0; a < 3; a++)
-                gt->sphere[a] = (lo[a] + hi[a]) * 0.5f;
-            gt->sphere[3] = 0.5f * sqrtf(dx * dx + dy * dy + dz * dz) * 1.001f + 1e-3f;
-            unsigned at = (addr + first * stride) & 0x0fffffff;
-            gt->word = n + 1;
-            nl[n++] = 0x10u << 24; /* the gate's BASE: set with the copy's addresses below */
-            nl[n++] = 0;           /* the gate: NOP (open) */
-            nl[n++] = 0x10u << 24 | (at >> 8 & 0xf0000);
-            nl[n++] = 0x01u << 24 | (at & 0xffffff);
-            nl[n++] = 0x04u << 24 | prim << 16 | count;
-            gt->after = n;
-        }
-        addr += (w & 0xffff) * stride;
-    }
-    nl[n] = 0x0Bu << 24; /* RET */
-    if (n != words || c != chunks) {
-        free(gs->cut), free(gs), free(nl);
-        return 0;
-    }
-    gs->n = chunks, gs->words = n;
-    gs->copy[0] = nl;
-    for (int v = 1; v < 3; v++)
-        if (!(gs->copy[v] = memalign(16, (words + 1) * 4))) {
-            free(gs->copy[1]), free(gs->cut), free(gs), free(nl);
-            return 0;
-        } else
-            memcpy(gs->copy[v], nl, (words + 1) * 4);
-    for (int v = 0; v < 3; v++) { /* each copy's own gate BASEs and box BJUMP */
-        unsigned *cp = gs->copy[v];
-        for (int i = 0; i < chunks; i++) {
-            unsigned after = (unsigned)(cp + gs->g[i].after) & 0x0fffffff;
-            cp[gs->g[i].word - 1] = 0x10u << 24 | (after >> 8 & 0xf0000);
-        }
-        if (n >= 6 && cp[3] >> 24 == 0x07 && cp[5] >> 24 == 0x09) {
-            unsigned end = (unsigned)(cp + n) & 0x0fffffff;
-            cp[4] = 0x10u << 24 | (end >> 8 & 0xf0000);
-            cp[5] = 0x09u << 24 | (end & 0xffffff);
-        }
-        sceKernelDcacheWritebackRange(cp, (n + 1) * 4);
-    }
-    free(list);
-    *plist = nl, *pk = n;
-    sl_gate_lists++;
-    return gs;
-}
-
 static int sl_keep(StaticList *e, const unsigned *from, const unsigned *to, int check, const Geometry *geometry)
 {
     const unsigned *m0 = mesh_model_begin, *m1 = mesh_model_mark;
@@ -1099,15 +857,15 @@ static int sl_keep(StaticList *e, const unsigned *from, const unsigned *to, int 
         sl_refused[0]++;
         return 0;
     }
-    int prefix = sl_ge_uncut || p4_ge_compile ? 6 : 0; /* b436: every compiled list starts with its box */
+    int prefix = 6; /* b436: every compiled list starts with its box */
     int n = (m0 - from) + (to - m1) + prefix, draws = 0;
     if (n <= 0 || n > 4096 || sl_nslots <= 0 || sl_nslots > SL_MESHES || sl_nextra > SL_EXTRA) {
         e->split = 1;
         sl_refused[1]++;
         sl_size_why[n <= 0 ? 0 : n > 4096 ? 1 : sl_nslots <= 0 ? 2 : 3]++;
         if (sl_size_logged++ < 32)
-            p4_log("static record refused g %p verts %d meshes %u indices %u words %d slots %d uncut %d\n",
-                   geometry, geometry->numVertices, geometry->mesh->numMeshes, geometry->mesh->totalIndices, n, sl_nslots, sl_ge_uncut);
+            p4_log("static record refused g %p verts %d meshes %u indices %u words %d slots %d\n",
+                   geometry, geometry->numVertices, geometry->mesh->numMeshes, geometry->mesh->totalIndices, n, sl_nslots);
         return 0;
     }
     /* the copies of the slots (and b288 of the guard results): one block */
@@ -1138,16 +896,6 @@ static int sl_keep(StaticList *e, const unsigned *from, const unsigned *to, int 
         offset[i] = bytes;
         bytes += (rb[i] + 15) & ~15;
     }
-    float position_scale = p4_ge_compile ? 0 : sl_position_candidate(from, to, geometry); /* b436: compiled lists pack their own */
-    if (position_scale) { /* the packed buffers (regions after the slots' indices) shrink by 4 bytes a vertex */
-        bytes = 0;
-        for (int i = 0; i < nreg; i++) {
-            if (i >= sl_nslots)
-                rb[i] = sl_slot[i - sl_nslots]->vertices * (sl_position_head(i - sl_nslots) + 8u);
-            offset[i] = bytes;
-            bytes += (rb[i] + 15) & ~15;
-        }
-    }
     int box_offset = bytes;
     if (prefix) bytes += 8 * 3 * sizeof(float);
     if (!check && sl_bytes + bytes + (n + 1) * 4 > (unsigned)p4_static_list_budget) {
@@ -1174,8 +922,6 @@ static int sl_keep(StaticList *e, const unsigned *from, const unsigned *to, int 
             return 0;
         }
         list[k] = *w;
-        if (position_scale && cmd == 0x12)
-            list[k] = (*w & ~GU_VERTEX_BITS) | GU_VERTEX_16BIT;
         if (cmd == 0x10)
             base_at = k;
         if (cmd == 0x01 || cmd == 0x02) { /* VADDR, IADDR: must be in a slot the draw used */
@@ -1231,36 +977,8 @@ static int sl_keep(StaticList *e, const unsigned *from, const unsigned *to, int 
         if (!same && sl_check_diffs++ < 8)
             p4_log("TRACE static list differs: atomic %p geometry %p words %d recorded %d\n", e->atomic, (void *)e->g, k + 1, e->words);
     }
-    for (int i = 0; i < nreg; i++) {
-        if (position_scale && i >= sl_nslots)
-            static_position_copy(data + offset[i], rp[i], sl_slot[i - sl_nslots]->vertices, position_scale,
-                                 sl_position_head(i - sl_nslots));
-        else memcpy(data + offset[i], rp[i], rb[i]);
-    }
-    /* b442: which mesh of the geometry each PRIM draws (from the slot its indices are in), for the gates */
-    unsigned char *prim_mesh = 0;
-    int nprims = 0;
-    if (sl_gate_rec && geometry && (prim_mesh = malloc(draws ? draws : 1))) {
-        const Mesh *m0 = (const Mesh *)((const char *)geometry->mesh + sizeof(MeshHeader) + geometry->mesh->firstMeshOffset);
-        unsigned b = 0, iaddr = 0;
-        for (int i = prefix; i < k && prim_mesh; i++) {
-            unsigned w = list[i], cmd = w >> 24;
-            if (cmd == 0x10) b = w;
-            else if (cmd == 0x02) iaddr = sl_address(b, w);
-            else if (cmd == 0x04) {
-                int mesh = -1;
-                for (int r = 0; r < sl_nslots && mesh < 0; r++) {
-                    unsigned lo = ((unsigned)data + offset[r]) & 0x0fffffff;
-                    if (iaddr >= lo && iaddr < lo + rb[r])
-                        mesh = (const Mesh *)sl_slot[r]->mesh - m0;
-                }
-                if (mesh < 0 || mesh >= geometry->mesh->numMeshes || nprims >= draws)
-                    free(prim_mesh), prim_mesh = 0;
-                else
-                    prim_mesh[nprims++] = mesh;
-            }
-        }
-    }
+    for (int i = 0; i < nreg; i++)
+        memcpy(data + offset[i], rp[i], rb[i]);
     int indexed = 1; /* b418 */
     if (p4_static_flat) { /* b393 */
         char *flat = sl_flatten(list, k, &bytes);
@@ -1270,63 +988,14 @@ static int sl_keep(StaticList *e, const unsigned *from, const unsigned *to, int 
             sl_flat_refused++;
     }
     float q_centre[3] = { 0, 0, 0 }, q_scale = 0;
-    if (p4_ge_compile && !indexed) /* b436 */
+    if (!indexed) /* b436 */
         sl_compile(q_centre, &q_scale, &list, &k, &data, &bytes);
-    SlGates *gates = 0;
-    if (sl_gate_rec) { /* b442: a gated list or none */
-        gates = prim_mesh && !indexed ? sl_gate_build(&list, &k, prim_mesh, nprims, geometry) : 0;
-        free(prim_mesh);
-        if (gates && sl_nslots > 0 && (gates->mesh = calloc(sl_nslots, sizeof *gates->mesh))) { /* b443 */
-            const Mesh *m0 = (const Mesh *)((const char *)geometry->mesh + sizeof(MeshHeader) + geometry->mesh->firstMeshOffset);
-            int ok = 1;
-            for (int r = 0; r < sl_nslots && ok; r++) {
-                const MeshCache *sc = sl_slot[r];
-                int mi = (const Mesh *)sc->mesh - m0, dup = 0;
-                for (int j = 0; j < gates->nmesh; j++)
-                    dup |= gates->mesh[j].mi == mi;
-                if (dup)
-                    continue;
-                unsigned vb = sc->vertices * gd_vertex_size(sc->vtype), ib = sc->indices * 2;
-                SlGateMesh *gm = &gates->mesh[gates->nmesh];
-                /* b447: lit meshes too (draw_mesh_vertices binds the GE light from the material and scene light) */
-                int why = !sc->v || !sc->idx ? 0 : mi < 0 || mi >= geometry->mesh->numMeshes ? 1 : sc->vertices > MAX_GUARDED ? 2 :
-                          sc->indices != m0[mi].numIndices ? 3 : -1;
-                ok = why < 0 && (gm->v = memalign(16, vb)) && (gm->idx = memalign(16, ib));
-                if (!ok) {
-                    sl_gate_why[why < 0 ? 4 : why]++;
-                    break;
-                }
-                memcpy(gm->v, sc->v, vb), memcpy(gm->idx, sc->idx, ib);
-                sceKernelDcacheWritebackRange(gm->v, vb), sceKernelDcacheWritebackRange(gm->idx, ib);
-                gm->mi = mi, gm->prim = sc->prim, gm->vtype = sc->vtype, gm->nverts = sc->vertices, gm->material = m0[mi].material;
-                gates->nmesh++;
-            }
-            if (!ok) { /* odd (sl_gate_why): the closed chunks take the body path */
-                for (int j = 0; j <= gates->nmesh && j < sl_nslots; j++)
-                    free(gates->mesh[j].v), free(gates->mesh[j].idx);
-                free(gates->mesh), gates->mesh = 0, gates->nmesh = 0;
-            }
-        }
-        if (!gates) {
-            free(list), free(data);
-            sl_refused[1]++;
-            return 0;
-        }
-    }
     sceKernelDcacheWritebackRange(data, bytes);
     sceKernelDcacheWritebackRange(list, (k + 1) * 4);
     sl_drop(e);
     e->indexed = indexed;
     e->list = list, e->data = data, e->words = k + 1, e->draws = draws, e->bytes = bytes + (k + 1) * 4;
-    e->gates = gates;
-    if (gates)
-        e->bytes += 2 * (k + 1) * 4 + gates->n * (sizeof(SlGate) + 1);
-    e->position_scale = position_scale;
     memcpy(e->q_centre, q_centre, sizeof q_centre), e->q_scale = q_scale;
-    for (int i = 0; position_scale && i < sl_nslots; i++) {
-        sl_position_vertices += sl_slot[i]->vertices;
-        sl_position_bytes += sl_slot[i]->vertices * 4u;
-    }
     e->split = 0;
     sl_bytes += e->bytes;
     sl_records++;
@@ -1376,7 +1045,6 @@ static void sl_parts(StaticList *e, const Geometry *g)
 }
 P4_HOT static int sl_inside(const StaticList *e, const Matrix *model, const float *sphere)
 {
-    if (sl_ge_uncut) return 1;
     if (replay_unguarded(model, sphere))
         return 1;
     if (!e->parts || !p4_guard_clip || !guard_code)
@@ -1412,7 +1080,7 @@ P4_HOT static unsigned sl_fog_key(void)
    There is no geometry reduction or clipping bypass. Keep the wrappers alive while their cache keys are in use. */
 P4_HOT static int sl_mesh_same(const SlMeshSet *s, const Geometry *g, const V3 *normals)
 {
-    if (s->ge_mode != p4_ge_static_clip || s->chunk != p4_static_chunk || g->locked || s->source != g || s->header != g->mesh || s->nmeshes != g->mesh->numMeshes || s->serial != g->mesh->serial ||
+    if (g->locked || s->source != g || s->header != g->mesh || s->nmeshes != g->mesh->numMeshes || s->serial != g->mesh->serial ||
         s->mesh_flags != g->mesh->flags || s->flags != g->flags || s->nverts != g->numVertices || s->verts != g->morphTarget->verts ||
         s->uv != (g->numTexCoordSets ? g->texCoords[0] : 0) || s->prelit != g->preLit || s->normals != normals)
         return 0;
@@ -1425,65 +1093,13 @@ P4_HOT static int sl_mesh_same(const SlMeshSet *s, const Geometry *g, const V3 *
     }
     return 1;
 }
-static float sl_ge_limit(const Matrix *model, const float bounds[6])
-{
-    if (!p4_guard_gnear || !current_camera) return 0;
-    Mat4 m;
-    guard_world_planes();
-    if (model) { mat4_from(m, model); mat4_mul(m, m, guard_world.vp); }
-    else memcpy(m, guard_world.vp, sizeof m);
-    return p4_ge_edge_limit((const float (*)[4])m, bounds, *(float *)((char *)current_camera + CAMERA_NEAR), GUARD);
-}
-static void sl_ge_prepare_part(SlMeshPart *p, const Matrix *model, const V3 *normals)
-{
-    Geometry *g = &p->geometry;
-    float limit = sl_ge_limit(model, p->bounds) * 0.75f;
-    P4GePrepared prep;
-    if (!p4_ge_prepare(&prep, (const float *)p->target.verts, g->numTexCoordSets ? g->texCoords[0] : 0,
-                       normals ? (const float *)normals : 0, g->preLit, g->numVertices,
-                       p->source.indices, p->source.numIndices, (p->draw.header.flags & MESH_PRIM_MASK)==MESH_TRISTRIP,
-                       limit, p4_ge_clip_growth)) { sl_ge_refused++; return; }
-    unsigned bytes = prep.nv * (sizeof(V3) + (normals ? sizeof(V3) : 0) + (g->numTexCoordSets ? 8 : 0) + (g->preLit ? 4 : 0)) + prep.ni * 2;
-    char *data = sl_bytes + bytes <= (unsigned)p4_static_list_budget ? malloc(bytes) : 0;
-    if (!data) { p4_ge_prepared_free(&prep); sl_ge_refused++; return; }
-    p->prepared = data; p->prepared_bytes = bytes; p->max_edge = prep.edge; sl_bytes += bytes;
-    p->target.verts = (V3 *)data; data += prep.nv * sizeof(V3);
-    if (normals) { p->target.normals = (V3 *)data; data += prep.nv * sizeof(V3); }
-    if (g->numTexCoordSets) { g->texCoords[0] = (float (*)[2])data; data += prep.nv * 8; }
-    if (g->preLit) { g->preLit = (unsigned *)data; data += prep.nv * 4; }
-    p->draw.mesh.indices = (unsigned short *)data;
-    memcpy(data, prep.idx, prep.ni * 2);
-    for (int i=0;i<prep.nv;i++) {
-        memcpy(&p->target.verts[i], prep.v[i].p, sizeof(V3));
-        if (normals) memcpy(&p->target.normals[i], prep.v[i].normal, sizeof(V3));
-        if (g->numTexCoordSets) memcpy(g->texCoords[0][i], prep.v[i].uv, 8);
-        if (g->preLit) g->preLit[i] = prep.v[i].colour;
-    }
-    g->numVertices = prep.nv; g->numTriangles = prep.ni/3;
-    p->draw.mesh.numIndices = p->draw.header.totalIndices = prep.ni;
-    p->draw.header.flags &= ~MESH_PRIM_MASK;
-    p4_ge_prepared_free(&prep); sl_ge_builds++;
-}
 static SlMeshSet *sl_mesh_build(const Geometry *g, const V3 *normals, const Matrix *model)
 {
-    int nm = g->mesh->numMeshes, strip = (g->mesh->flags & MESH_PRIM_MASK) == MESH_TRISTRIP;
+    int nm = g->mesh->numMeshes;
     if (g->locked || nm < 1 || nm > 128 || g->numVertices <= 0 || !g->morphTarget->verts)
         return 0;
     const Mesh *m = (const Mesh *)((const char *)g->mesh + sizeof(MeshHeader) + g->mesh->firstMeshOffset);
-    /* b441: parts of `chunk` triangles (even, so a strip part keeps the GE's winding), fewer than SL_CHUNK_PARTS */
-    int chunk = p4_static_chunk > 0 ? (p4_static_chunk + 1) & ~1 : 0, n = nm;
-    for (int pass = 0; chunk && pass < 16; pass++) {
-        n = 0;
-        for (int i = 0; i < nm; i++) {
-            int tris = strip ? m[i].numIndices - 2 : m[i].numIndices / 3;
-            n += tris > chunk ? (tris + chunk - 1) / chunk : 1;
-        }
-        if (n <= SL_CHUNK_PARTS)
-            break;
-        chunk *= 2;
-    }
-    if (n > (chunk ? SL_CHUNK_PARTS : 128))
-        return 0;
+    int n = nm;
     unsigned bytes = sizeof(SlMeshSet) + n * sizeof(SlMeshPart);
     if (sl_bytes + bytes > (unsigned)p4_static_list_budget)
         return 0;
@@ -1491,28 +1107,16 @@ static SlMeshSet *sl_mesh_build(const Geometry *g, const V3 *normals, const Matr
     if (!s)
         return 0;
     s->source = g, s->header = g->mesh, s->count = n, s->nverts = g->numVertices;
-    s->nmeshes = nm, s->chunk = p4_static_chunk;
-    s->ge_mode = p4_ge_static_clip;
+    s->nmeshes = nm;
     s->serial = g->mesh->serial, s->mesh_flags = g->mesh->flags, s->flags = g->flags;
     s->verts = g->morphTarget->verts, s->uv = g->numTexCoordSets ? g->texCoords[0] : 0, s->prelit = g->preLit, s->normals = normals;
-    for (int i = 0, pi = 0, t0 = 0; i < nm && pi < n; pi++) {
-        SlMeshPart *p = &s->part[pi];
+    for (int i = 0; i < nm; i++) {
+        SlMeshPart *p = &s->part[i];
         /* Late passes and moving arrays stay together on the original path. */
         if (!m[i].indices || m[i].numIndices <= 0 || !m[i].material || translucent_material(m[i].material, g->flags & 0x40))
             goto refused;
-        /* b441: this part's index range of mesh i (a strip part overlaps the next by two indices) */
-        int tris = strip ? m[i].numIndices - 2 : m[i].numIndices / 3, first = 0, count = m[i].numIndices;
-        if (chunk && tris > chunk) {
-            int nt = tris - t0 < chunk ? tris - t0 : chunk;
-            first = strip ? t0 : t0 * 3, count = strip ? nt + 2 : nt * 3;
-        }
         Mesh piece = m[i];
-        piece.indices = m[i].indices + first, piece.numIndices = count;
         p->mi = i;
-        if (chunk && tris > chunk && (t0 += chunk) < tris)
-            ; /* the next part is the same mesh's next chunk */
-        else
-            i++, t0 = 0;
         float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
         for (int j = 0; j < piece.numIndices; j++) {
             unsigned v = piece.indices[j];
@@ -1541,7 +1145,6 @@ static SlMeshSet *sl_mesh_build(const Geometry *g, const V3 *normals, const Matr
         p->draw.header.firstMeshOffset = (char *)&p->draw.mesh - (char *)(&p->draw.header + 1);
         p->draw.mesh = piece;
         p->source = m[p->mi];
-        memcpy(p->bounds,lo,12);memcpy(p->bounds+3,hi,12);
         float dx = hi[0] - lo[0], dy = hi[1] - lo[1], dz = hi[2] - lo[2];
         for (int k = 0; k < 3; k++)
             p->target.sphere[k] = (lo[k] + hi[k]) * 0.5f;
@@ -1552,7 +1155,6 @@ static SlMeshSet *sl_mesh_build(const Geometry *g, const V3 *normals, const Matr
         p->entry.stamp = cache_frame - 1; /* parent already passed the first-sight rule */
     }
     sl_bytes += bytes;
-    if (p4_ge_static_clip) for (int i=0;i<n;i++) sl_ge_prepare_part(&s->part[i],model,normals);
     sl_mesh_builds++;
     return s;
 refused:
@@ -1576,13 +1178,7 @@ P4_HOT static void sl_model(const StaticList *e, const Matrix *model)
         set_matrix(GU_MODEL, &m);
         return;
     }
-    if (!e->position_scale) { set_matrix(GU_MODEL, model); return; }
-    Matrix m = model ? *model : (Matrix){.right={1,0,0},.up={0,1,0},.at={0,0,1}};
-    float scale = e->position_scale;
-    m.right.x *= scale; m.right.y *= scale; m.right.z *= scale;
-    m.up.x *= scale; m.up.y *= scale; m.up.z *= scale;
-    m.at.x *= scale; m.at.y *= scale; m.at.z *= scale;
-    set_matrix(GU_MODEL, &m);
+    set_matrix(GU_MODEL, model);
 }
 
 /* b281 p4_inst_call: the next atomic of the same geometry, drawn right after a verified hit in the same state, takes the
@@ -1599,7 +1195,7 @@ static struct {
     unsigned *list;
     int render[MAX_STATE];
     unsigned sky[8];
-    int lit, uv_pack, position_pack;
+    int lit, uv_pack;
     SceneLight light;
 } sl_memo;
 static unsigned sl_memo_hits, sl_memo_why[8]; /* b282: why the memo was not taken (same geometry only) */
@@ -1607,13 +1203,12 @@ P4_HOT static void sl_memo_set(const StaticList *e, const Geometry *g, const V3 
 {
     if (!p4_inst_call)
         return;
-    if (e->gview || e->gates) { /* b288: cut for this model's view: no other instance may take it (b442: nor a gated list) */
+    if (e->gview) { /* b288: cut for this model's view: no other instance may take it */
         sl_memo.g = 0;
         return;
     }
     sl_memo.lit = normals != 0;
     sl_memo.uv_pack = p4_static_uv_pack;
-    sl_memo.position_pack = p4_static_position_pack;
     sl_memo.compile_key = sl_compile_key();
     if (normals) /* b282: lit instances too, while the scene's lights stay (GE lights are in the world) */
         sl_memo.light = scene_lights();
@@ -1628,7 +1223,7 @@ P4_HOT static int sl_memo_try(const Geometry *g, const Matrix *model, const V3 *
     if (!p4_inst_call || sl_memo.g != g)
         return 0;
     int why = sl_memo.lit != (normals != 0) || sl_memo.uv_pack != p4_static_uv_pack ||
-              sl_memo.position_pack != p4_static_position_pack || sl_memo.compile_key != sl_compile_key() ? 1 :
+              sl_memo.compile_key != sl_compile_key() ? 1 :
               sl_memo.frame != cache_frame || sl_memo.camera != current_camera ? 2 :
               sl_memo.texgen != texture_generation || sl_memo.mask != pixel_mask ? 3 : sl_memo.e->list != sl_memo.list || !sl_memo.list ? 4 :
               shadow_shear_m || rtt_target || draw_fixed_alpha || draw_skin_alpha ? 5 : memcmp(sl_memo.sky, sky_state, sizeof sl_memo.sky) ? 6 :
@@ -1688,147 +1283,6 @@ static void sl_tex_keep(StaticList *e)
     e->ntex = sl_ntex;
     e->texkey = sl_tex_hash(e->tex, e->ntex);
 }
-/* b442: a crossing atomic (or one with a gated list): 1 drawn (gated list plus its cut chunks), 0 the body draws it
-   (the gated list was just recorded off the screen, or cannot be), -1 the usual path decides. */
-/* b462: a gated list's draw (sl_gate_draw's hit, and world_direct.h's direct draw of a crossing atomic): the gates
-   for this view, the CALL of a free copy, the closed chunks cut from the kept copies. 0: the copy is busy */
-static int sl_gate_emit(StaticList *e, const Geometry *g, const Matrix *model, const V3 *normals, int modulate, float near)
-{
-    float (*uv)[2] = g->numTexCoordSets ? g->texCoords[0] : 0;
-    const float *sphere = g->morphTarget->sphere;
-    SlGates *gs = e->gates;
-    int k = cache_frame % 3;
-    if ((int)(ge_finished - gs->seq[k]) < 0) { /* b447: the GE may still read this copy: the usual path this frame */
-        sl_gate_busy++;
-        return 0; /* not -1: the usual hit path would CALL copy 0 with its gates as they were left */
-    }
-    unsigned *cp = gs->copy[k];
-    int cut = 0, changed = 0;
-    for (int i = 0; i < gs->n; i++) {
-        int open = replay_unguarded(model, gs->g[i].sphere) || guard_sphere_world(model, gs->g[i].sphere, near);
-        gs->cut[i] = !open, cut += !open;
-        unsigned after = (unsigned)(cp + gs->g[i].after) & 0x0fffffff, w = open ? 0 : 0x08u << 24 | (after & 0xffffff);
-        if (cp[gs->g[i].word] != w) /* b447: only the gates that changed since this copy's last use */
-            cp[gs->g[i].word] = w, changed = 1;
-    }
-    if (changed)
-        sceKernelDcacheWritebackRange(cp, (gs->words + 1) * 4);
-    gs->seq[k] = ge_queued + 1; /* the list this CALL goes into */
-    sl_gate_calls++, sl_gate_open += gs->n - cut, sl_gate_closed += cut;
-    begin_frame();
-    gu_mesh_begin();
-    set_camera();
-    sl_model(e, model);
-    unsigned *l = gu_list->current;
-    l[0] = 0x10u << 24 | ((unsigned)cp >> 8 & 0xf0000); /* BASE */
-    l[1] = 0x0Au << 24 | ((unsigned)cp & 0xffffff);      /* CALL */
-    gu_list->current = l + 2;
-    sl_forget();
-    replay.valid = 0;
-    sl_hits++;
-    mesh_draw_calls += e->draws;
-    draws_since_stall += e->draws;
-    if (draws_since_stall >= (unsigned)p4_draw_batch && !gu_object_stack_depth)
-        stall_flush();
-    if (cut && gs->mesh) { /* b443: the closed chunks cut straight from the kept copies */
-        sl_gate_now = gs;
-        set_matrix(GU_MODEL, model);
-        SceneLight light = scene_lights();
-        Mat4 mm;
-        guard_matrix_cached(mm, model);
-        draw_material_ge = !normals && modulate && p4_material_state == 2; /* b447: as the body's ge_colour */
-        for (int j = 0; j < gs->nmesh; j++) {
-            SlGateMesh *gm = &gs->mesh[j];
-            unsigned short first[64], count[64];
-            int nr = sl_gate_ranges(gm->mi, first, count, 64);
-            if (!nr)
-                continue;
-            void **texture = gm->material->texture;
-            bind_mask(gm->material->colour >> 24);
-            bind_raster(texture ? *texture : 0, GU_REPEAT);
-            int lit = (gm->vtype & GU_NORMAL_BITS) != 0;
-            guard_vfpu((const V3 *)((const char *)gm->v + (lit ? offsetof(Vertex3DN, x) : offsetof(Vertex3D, x))), gm->nverts,
-                       (const float (*)[4])mm, near, guard_clip, guard_code, lit ? sizeof(Vertex3DN) : sizeof(Vertex3D));
-            for (int r = 0; r < nr; r++)
-                draw_guarded(gm->prim, gm->idx + first[r], count[r], gm->v, gm->vtype, near, gm->material, modulate, &light);
-        }
-        draw_material_ge = 0;
-        sl_gate_now = 0;
-        sl_gate_light++;
-        replay.valid = 0;
-    } else if (cut) { /* the closed chunks, cut on the CPU */
-        sl_gate_now = gs;
-        draw_geometry = (Geometry *)g;
-        draw_meshes_body(g->mesh, g->morphTarget->verts, uv, g->preLit, g->numVertices, model, modulate, normals, sphere);
-        draw_geometry = 0;
-        sl_gate_now = 0;
-        replay.valid = 0; /* the partial draw must not be replayed for another instance */
-    }
-    if (wd_watch) /* b462 world_direct.h learns the gated list */
-        wd_note_gate(e, model, normals);
-    return 1;
-}
-
-static int sl_gate_draw(StaticList *e, const Geometry *g, const Matrix *model, const V3 *normals, float (*uv)[2], int modulate,
-                        const float *sphere, float near)
-{
-    unsigned state = sl_state_key(), materials = sl_material_key(g), texgen = texture_generation, bits = sl_bits(), light = 0;
-    if (normals) {
-        SceneLight l = scene_lights();
-        light = hash_words(2166136261u, &l, sizeof l);
-    }
-    int same = e->g == g && e->verts == g->morphTarget->verts && e->uv == uv && e->prelit == g->preLit && e->normals == normals &&
-               e->count == g->numVertices && e->modulate == modulate && e->camera == current_camera;
-    int hit = e->list && e->gates && same && !g->locked && e->state == state && e->materials == materials && sl_tex_same(e, texgen) &&
-              e->bits == bits && e->light == light;
-    e->stamp = cache_frame;
-    if (hit)
-        return sl_gate_emit(e, g, model, normals, modulate, near);
-    if (e->list || e->gates)
-        sl_drop(e);
-    if ((int)(e->retry - cache_frame) > 0 || g->locked)
-        return 0;
-    /* record the whole atomic uncut, then take the words back off the screen; the body draws this frame */
-    unsigned record_t0 = sceKernelGetSystemTimeLow();
-    begin_frame();
-    gu_mesh_begin();
-    set_camera();
-    sl_forget();
-    replay.valid = 0;
-    unsigned late = late_queued;
-    unsigned *from = gu_list->current;
-    sl_recording = 1, sl_nslots = 0, sl_ntex = 0;
-    sl_nextra = 0, sl_gbad = 0, sl_gview_set = 0, sl_uv_slots = 0, sl_uv_short = 0;
-    mesh_model_begin = mesh_model_mark = 0;
-    gu_object_stack_depth++;
-    sl_ge_uncut = 1, sl_gate_rec = 1;
-    draw_geometry = (Geometry *)g;
-    draw_site = DS_SLREC;
-    draw_meshes_body(g->mesh, g->morphTarget->verts, uv, g->preLit, g->numVertices, model, modulate, normals, sphere);
-    draw_site = DS_OTHER;
-    draw_geometry = 0;
-    draw_material_ge = 0;
-    gu_object_stack_depth--;
-    sl_recording = 0;
-    int kept = late_queued == late && !sl_gbad && !sl_uv_short && sl_keep(e, from, gu_list->current, 0, g);
-    sl_ge_uncut = 0, sl_gate_rec = 0;
-    gu_list->current = from; /* the uncut words never reach the GE */
-    sl_forget();
-    replay.valid = 0;
-    if (kept) {
-        e->built = cache_frame;
-        e->g = g, e->verts = g->morphTarget->verts, e->uv = uv, e->prelit = g->preLit, e->normals = normals, e->count = g->numVertices;
-        e->modulate = modulate, e->camera = current_camera, e->state = state, e->materials = materials, e->texgen = texgen;
-        sl_tex_keep(e);
-        e->bits = bits, e->light = light;
-    } else {
-        sl_drop(e);
-        e->retry = cache_frame + 64;
-    }
-    sl_record_time(sceKernelGetSystemTimeLow() - record_t0);
-    return 0;
-}
-
 /* 1: the entry is drawn (from its list, or through the body while recording). */
 P4_HOT static int sl_draw(StaticList *e, const void *atomic, const Geometry *g, const Matrix *model, const V3 *normals)
 {
@@ -1836,42 +1290,11 @@ P4_HOT static int sl_draw(StaticList *e, const void *atomic, const Geometry *g, 
     int modulate = (g->flags & 0x40) != 0;
     const float *sphere = g->morphTarget->sphere;
     unsigned last = e->stamp;
-    if (p4_static_gate && !sl_in_part && !sl_ge_uncut && p4_guard_clip && guard_code && current_camera && !p4_ge_split &&
-        !p4_mesh_strip_pack && !p4_sl_trust) { /* b442 */
-        guard_world_planes();
-        float near = *(float *)((char *)current_camera + CAMERA_NEAR) * 1.01f;
-        int crossing = !replay_unguarded(model, sphere) && !guard_sphere_world(model, sphere, near);
-        if (crossing || e->gates) {
-            int r = sl_gate_draw(e, g, model, normals, uv, modulate, sphere, near);
-            if (r >= 0)
-                return r;
-        }
-    }
-    if (p4_static_chunk && p4_guard_clip && guard_code && !sl_ge_uncut && current_camera) { /* b441 */
-        guard_world_planes();
-        float near = *(float *)((char *)current_camera + CAMERA_NEAR) * 1.01f;
-        if (!replay_unguarded(model, sphere) && !guard_sphere_world(model, sphere, near)) {
-            if (!sl_in_part)
-                e->split = 1; /* sl_try makes the parts next frame */
-            e->stamp = cache_frame;
-            sl_chunk_cut++;
-            return 0; /* a crossing part: cut on the CPU, never recorded for one view */
-        }
-        sl_chunk_inside += sl_in_part;
-    }
     if (!e->list && last + 1 != cache_frame) { /* b259: recorded from the second frame in a row it is seen */
         e->stamp = cache_frame;
         sl_misses[1]++;
         (sl_in_part ? sl_nolist_parts : sl_nolist)[SL_WHY_UNSEEN]++;
         return 0;
-    }
-    /* b297 p4_sl_trust (EXPERIMENT, picture may break): how fast the short path is without our checks. Bit 1: an
-       entry with a list is drawn without its keys (state, materials, light, arrays, camera); bit 2: also without the
-       guard-band test (a part near the camera goes uncut: the GE drops its crossing triangles). 0: as b296. */
-    if (e->list && (p4_sl_trust & 1) && ((p4_sl_trust & 2) || (!e->gview && sl_inside(e, model, sphere)))) {
-        e->stamp = cache_frame;
-        sl_trusted++;
-        goto draw_list;
     }
     if (e->list && e->gview) { /* b288: cut for one view; another view takes the body again */
         unsigned now[SL_VIEW];
@@ -1928,7 +1351,6 @@ P4_HOT static int sl_draw(StaticList *e, const void *atomic, const Geometry *g, 
     prof_end(PROF_LTEX);
     e->stamp = cache_frame;
     if (hit && !((p4_static_list_check || p4_static_uv_check) && !(cache_frame & 63))) {
-    draw_list:
         prof_begin(PROF_LCALL);
         if (wd_watch) /* b453 world_direct.h learns this call */
             wd_note(e, e->list, e->draws, model, normals, 0);
@@ -2037,9 +1459,7 @@ P4_HOT static int sl_mesh_draw(SlMeshSet *s, const Matrix *model, const V3 *norm
     gu_mesh_begin();
     for (int i = 0; i < s->count; i++) {
         SlMeshPart *p = &s->part[i];
-        const V3 *part_normals = normals && p->prepared ? p->target.normals : normals;
-        sl_ge_uncut = p4_ge_static_clip && p->prepared && p->max_edge < sl_ge_limit(model,p->bounds);
-        if (sl_ge_uncut) sl_ge_hits++; else if (p4_ge_static_clip) sl_ge_fallbacks++;
+        const V3 *part_normals = normals;
         unsigned hits = sl_hits;
         sl_in_part = 1;
         int drawn = sl_draw(&p->entry, &p->geometry, &p->geometry, model, part_normals);
@@ -2052,7 +1472,6 @@ P4_HOT static int sl_mesh_draw(SlMeshSet *s, const Matrix *model, const V3 *norm
         }
         sl_mesh_hits += sl_hits != hits;
         sl_mesh_fallback += sl_hits == hits;
-        sl_ge_uncut = 0;
     }
     return 1;
 }
@@ -2110,27 +1529,13 @@ static void sl_report(void)
            static_uv_why[0], static_uv_why[1], static_uv_why[2], static_uv_why[3], static_uv_why[4], static_uv_why[5], static_uv_retries);
     static_uv_retries = 0;
     memset(static_uv_why, 0, sizeof static_uv_why);
-    p4_log("static position pack %d: vertices %u vertex_bytes_saved %u; kept float: cut %u streams %u uv %u commands %u sphere %u per 256 frames\n",
-           p4_static_position_pack, sl_position_vertices, sl_position_bytes,
-           sl_position_why[0], sl_position_why[1], sl_position_why[2], sl_position_why[3], sl_position_why[4]);
-    memset(sl_position_why, 0, sizeof sl_position_why);
-    sl_position_vertices = sl_position_bytes = 0;
     if (p4_static_flat) /* b393: lists recorded since the last line; data bytes indexed -> flat */
         p4_log("static flat: lists %u refused %u bytes %u -> %u\n", sl_flat_lists, sl_flat_refused, sl_flat_in, sl_flat_out);
     if (p4_static_flat) /* b411 */
         p4_log("static colour16 %d: lists %u, kept 8888 for alpha %u\n", p4_static_colour16, sl_c16_lists, sl_c16_alpha);
     sl_c16_lists = sl_c16_alpha = 0;
-    if (p4_ge_compile) /* b436 */
-        p4_log("ge compile: lists %u (s8 %u s16 %u, no vertex colour %u, strip draws %u) bytes %u -> %u\n", slc_lists, slc_s8, slc_s16, slc_plain, slc_strips, slc_in, slc_out);
+    p4_log("ge compile: lists %u (s8 %u s16 %u, no vertex colour %u, strip draws %u) bytes %u -> %u\n", slc_lists, slc_s8, slc_s16, slc_plain, slc_strips, slc_in, slc_out);
     slc_lists = slc_s8 = slc_s16 = slc_plain = slc_strips = slc_in = slc_out = 0;
-    if (p4_static_gate) /* b442 */
-        p4_log("static gate: lists made %u, calls %u (light path %u, GE busy %u), chunks open %u closed (cut) %u; no copies: slot %u mesh %u big %u indices %u memory %u per 256 frames\n",
-               sl_gate_lists, sl_gate_calls, sl_gate_light, sl_gate_busy, sl_gate_open, sl_gate_closed, sl_gate_why[0], sl_gate_why[1], sl_gate_why[2], sl_gate_why[3], sl_gate_why[4]);
-    sl_gate_lists = sl_gate_calls = sl_gate_open = sl_gate_closed = sl_gate_light = sl_gate_busy = 0;
-    memset(sl_gate_why, 0, sizeof sl_gate_why);
-    if (p4_static_chunk) /* b441 */
-        p4_log("static chunk %d: parts inside %u, crossing (cut) %u per 256 frames\n", p4_static_chunk, sl_chunk_inside, sl_chunk_cut);
-    sl_chunk_inside = sl_chunk_cut = 0;
     if (p4_sl_rtt) /* b402 */
         p4_log("static lists in camera textures: tries %u per 256 frames\n", sl_rtt_hits);
     sl_rtt_hits = 0;
@@ -2149,8 +1554,6 @@ static void sl_report(void)
            p4_static_guard_lists, sl_guard_hits, sl_guard_lists, sl_guard_moved, sl_guard_why[0], sl_guard_why[1], sl_guard_why[2],
            sl_guard_churned, sl_guard_refused);
     sl_guard_hits = sl_guard_lists = sl_guard_moved = sl_guard_refused = sl_guard_churned = 0;
-    p4_log("static trust %d: trusted draws %u per 256 frames\n", p4_sl_trust, sl_trusted);
-    sl_trusted = 0;
     memset(sl_guard_why, 0, sizeof sl_guard_why);
     memset(sl_size_why, 0, sizeof sl_size_why);
     sl_evictions = 0;
@@ -2160,9 +1563,6 @@ static void sl_report(void)
     sl_memo_hits = 0;
     memset(sl_memo_why, 0, sizeof sl_memo_why);
     p4_log("static mesh lists %d per 256 frames: hits %u fallback %u builds %u\n", p4_static_mesh_lists, sl_mesh_hits, sl_mesh_fallback, sl_mesh_builds);
-    p4_log("GE static clip %d growth %d: certified %u fallback %u prepared %u refused %u per 256 frames\n",
-           p4_ge_static_clip,p4_ge_clip_growth,sl_ge_hits,sl_ge_fallbacks,sl_ge_builds,sl_ge_refused);
-    sl_ge_hits=sl_ge_fallbacks=sl_ge_builds=sl_ge_refused=0;
     sl_mesh_hits = sl_mesh_fallback = sl_mesh_builds = 0;
     p4_log("static no-list draws (whole/parts) per 256 frames: unseen %u/%u view %u/%u churn %u/%u guard %u/%u late %u/%u keep %u/%u now %u/%u\n",
            sl_nolist[0], sl_nolist_parts[0], sl_nolist[1], sl_nolist_parts[1], sl_nolist[2], sl_nolist_parts[2], sl_nolist[3], sl_nolist_parts[3],

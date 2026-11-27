@@ -34,7 +34,7 @@ static unsigned ui_epoch,texture_generation,null_add_skipped;
 static unsigned ui_cache_texonly,ui_why[8],ui_why_rs[16];
 #define MAX_STATE 32
 #define SKIPPING skip_frame
-static int p4_probe_2d,p4_2d_nan_drop=1,p4_alpha_pixel,p4_2d_alpha_masks,p4_alpha_write_test;
+static int p4_probe_2d,p4_alpha_pixel,p4_2d_alpha_masks,p4_alpha_write_test;
 static unsigned alpha_mask_low;static int p4_feedback_sprites=1,p4_alpha_mask_coarse=32,p4_dst_alpha_many,cache_frame,p4_dst_alpha_passes;
 static unsigned nan_2d_dropped,sky_state[8],pixel_mask,dst_small_now,dst_small_last,dst_small_frame,dst_alpha_skipped,gs_alpha_splits;
 static int render_state[32];

@@ -17,7 +17,7 @@ PSP_HEAP_SIZE_KB(-1); /* the heap is claimed before main */
    at every movie (MPEG library in the low hole, SAS and AVCODEC loaded), PPSSPP's lowest 4128 KB; no utility dialogs */
 PSP_HEAP_THRESHOLD_SIZE_KB(2048);
 
-#define BUILD 524
+#define BUILD 529
 #define P4_IMAGE_SIZE 0x40B000 /* retail 0x52da00..0x938a00: data and bss */
 #include "paths.h"
 #define GAME_DIR "ms0:/PSP/GAME/P4/" /* only until p4_paths_init: the log before it */
@@ -256,11 +256,19 @@ void p4_memstat_report(void);
    14 MB free in pieces, largest 1.9 MB) gets the reserve back first, on any thread (the caches only go on the drawing
    thread). The drawing thread takes it again when the heap has such a run (p4_heap_reserve_tick); taking it may leave a
    later load short, which then releases it again. 0 KB: off. */
+#ifdef P4_HW_PROFILE
+int p4_poison_check = 0; /* b529: 1 fills every freed heap block (tools/psp_stress.py turns it on) */
+static unsigned poison_blocks, poison_said;
+#endif
 int p4_heap_reserve_kb = 2560;
 static void *heap_reserve;
 static unsigned heap_reserve_bytes(void) { return (unsigned)p4_heap_reserve_kb << 10; }
 void p4_heap_reserve_tick(void)
 {
+#ifdef P4_HW_PROFILE
+    if (p4_poison_check && (!poison_said++ || poison_blocks))
+        p4_log("poison check: %u freed blocks filled\n", poison_blocks), poison_blocks = 0;
+#endif
     if (heap_reserve || p4_heap_reserve_kb <= 0)
         return;
     struct mallinfo m = mallinfo(); /* 2 MB left besides it, or the game's next blocks give it straight back */
@@ -420,6 +428,16 @@ void __wrap_free(void *p)
         }
     }
     ms_remove(p);
+#ifdef P4_HW_PROFILE
+    /* b529 (issue #24): a freed block filled with an odd, out-of-RAM word (a NaN as a float), so a stale pointer read
+       out of it faults at once, in PPSSPP too, instead of whatever the next owner of the address left there */
+    if (p4_poison_check && p) {
+        unsigned *w = p, n = ((((const unsigned *)p)[-1] & ~3u) - 4) / 4;
+        for (unsigned i = 0; i < n; i++)
+            w[i] = 0xFFEEFEEFu;
+        poison_blocks++;
+    }
+#endif
     __real_free(p);
 }
 void *__wrap_realloc(void *old, size_t n)

@@ -20,7 +20,7 @@
    as the body's hit does (b453's diffs: memo sources flipping). The log line says why entries took the body.
    p4_world_direct_check 1: every 64th frame all entries take the body and the result is compared (diffs logged).
    0: the retail passes' logic (every entry through the body), as b452. */
-int p4_world_direct = 1, p4_world_direct_check = 0; /* b461: on (PSP Heaven 41.0 -> 37.9 ms, Junes 52.8 -> 44.4 ms, profiled; picture unchanged, check 0 list diffs) */
+int p4_world_direct_check = 0; /* b461: on (PSP Heaven 41.0 -> 37.9 ms, Junes 52.8 -> 44.4 ms, profiled; picture unchanged, check 0 list diffs) */
 
 enum { WD_NONE, WD_CALL, WD_CULL };
 typedef struct {
@@ -30,7 +30,6 @@ typedef struct {
     const void *camera;
     signed char kind, lit, memo, vis, vis_known, inside; /* inside -1: not tested for camkey */
     signed char valpha;  /* b456: drawn with vertex alpha off (the entry's flag), keys taken in that state */
-    signed char gate, modulate; /* b462: a gated list (p4_static_gate): crossing atomics, cut by chunks */
     signed char fp, far; /* b456: a far stand-in candidate (fp_try); far: its decision when learned (hysteresis) */
     int flags;
     float sphere[4]; /* model space: the guard-band test */
@@ -44,7 +43,7 @@ static WdList *wd_lists;
 /* why an entry took the body (W_*), and why it was not kept after it (N_*) */
 enum { W_NEW, W_FORCED, W_VALPHA, W_MATRIX, W_VISIBLE, W_LIST, W_CAMERA, W_STATE, W_LIGHT, W_TEX, W_GUARD, W_FADE, W_OFF, W_FAR, W_N };
 enum { N_GATE, N_NONE, N_MULTI, N_FAR, N_CB, N_DRAWS, N_VALPHA, N_OFF, N_N };
-static unsigned wd_gated, wd_rechecked, wd_direct, wd_moved, wd_culled, wd_body, wd_learned, wd_checks, wd_why[W_N], wd_not[N_N], wd_diff[4];
+static unsigned wd_stale, wd_rechecked, wd_direct, wd_moved, wd_culled, wd_body, wd_learned, wd_checks, wd_why[W_N], wd_not[N_N], wd_diff[4];
 static unsigned wd_why_us[W_N], wd_not_us[N_N]; /* b457: the body's time by reason (us per 256 frames) */
 /* b457: the geometries that take the body most (not kept, or crossing the guard band), by time */
 enum { WD_TOP = 8 };
@@ -75,7 +74,7 @@ static void wd_top_note(const void *atomic, const Geometry *g, unsigned us, int 
     wd_top[k].split = e && e->split, wd_top[k].meshes = e && e->meshes, wd_top[k].retry = e ? (int)(e->retry - cache_frame) : 0;
 }
 static int wd_seen; /* wd_watch: the body's prepared-list calls for the atomic being learned */
-static struct { const void *e; const unsigned *list; unsigned draws, state, bits; const Matrix *model; int lit, memo, gate; } wd_got;
+static struct { const void *e; const unsigned *list; unsigned draws, state, bits; const Matrix *model; int lit, memo; } wd_got;
 static unsigned wd_pass_state, wd_pass_bits, wd_pass_light, wd_camkey;
 static int wd_pass_valid, wd_pass_light_valid, wd_cam_ok;
 /* b481 p4_world_defer: direct entries are not emitted as they are decided but queued and emitted together, in
@@ -101,12 +100,6 @@ static void wd_note(const void *e, const unsigned *list, unsigned draws, const M
     wd_seen++;
     wd_got.e = e, wd_got.list = list, wd_got.draws = draws, wd_got.model = model, wd_got.lit = normals != 0, wd_got.memo = memo;
     wd_got.state = sl_state_key(), wd_got.bits = sl_bits(); /* the state the list was taken in (b456: vertex alpha) */
-    wd_got.gate = 0;
-}
-static void wd_note_gate(const void *e, const Matrix *model, const void *normals)
-{
-    wd_note(e, ((const StaticList *)e)->list, ((const StaticList *)e)->draws, model, normals, 0);
-    wd_got.gate = 1;
 }
 
 /* atomic_cover from the entry's own sphere copy */
@@ -172,7 +165,7 @@ static WdEntry *wd_at(WdList *l, int i, const void *node)
 
 static int wd_global_ok(void)
 {
-    return p4_world_direct && current_camera && !rtt_target && !shadow_shear_m && !p4_probe_flags && !p4_probe_geometry &&
+    return current_camera && !rtt_target && !shadow_shear_m && !p4_probe_flags && !p4_probe_geometry &&
            !p4_probe_geometry2 && !p4_probe_geometry3 && !p4_probe_geometry4 && !trace_atomics && p4_static_list && p4_state_cache &&
            p4_draw_batch > 1 && !p4_mesh_frustum && !p4_probe_depth_mode && !p4_probe_3d && !p4_hide_material &&
            !p4_gs_test_raw_prelit && !draw_fixed_alpha && !draw_skin_alpha && p4_cull_far <= 0 && p4_cull_cover <= 0 &&
@@ -233,7 +226,7 @@ static void wd_fold(const StaticList *e, const Matrix *model, Matrix *m)
         m->pos.y += m->right.y * c[0] + m->up.y * c[1] + m->at.y * c[2];
         m->pos.z += m->right.z * c[0] + m->up.z * c[1] + m->at.z * c[2];
     }
-    float s = e->q_scale ? e->q_scale : e->position_scale;
+    float s = e->q_scale;
     if (s) {
         m->right.x *= s; m->right.y *= s; m->right.z *= s;
         m->up.x *= s; m->up.y *= s; m->up.z *= s;
@@ -335,7 +328,7 @@ static void wd_learn(WdEntry *w, const unsigned char *node, int gate, int why)
     if (n < 0)
         n = wd_seen == 0 ? N_NONE : wd_seen != 1 ? N_MULTI : !g ? N_NONE :
             *(void **)((char *)atomic + 0x48) != (void *)func_003be9f0 ? N_CB :
-            (!wd_got.gate && mesh_draw_calls - calls != wd_got.draws) || !wd_got.model ? N_DRAWS : -1;
+            mesh_draw_calls - calls != wd_got.draws || !wd_got.model ? N_DRAWS : -1;
     if (n >= 0) {
         wd_not[n] += ran > 0;
         wd_not_us[n] += us;
@@ -346,7 +339,6 @@ static void wd_learn(WdEntry *w, const unsigned char *node, int gate, int why)
     const StaticList *e = wd_got.e;
     w->kind = WD_CALL, w->atomic = atomic, w->frame = *(void **)((char *)atomic + ATOMIC_FRAME), w->g = g, w->e = e;
     w->eatom = e->atomic, w->valpha = *(const int *)(node + 4) == 1, w->materials = sl_material_key(g);
-    w->gate = wd_got.gate && e->gates && ((const SlGates *)e->gates)->mesh, w->modulate = (g->flags & 0x40) != 0;
     w->list = wd_got.list, w->draws = wd_got.draws, w->built = e->built;
     w->lit = wd_got.lit, w->memo = wd_got.memo, w->flags = g->flags & 0xffff;
     w->model = *wd_got.model;
@@ -372,36 +364,6 @@ static void wd_learn(WdEntry *w, const unsigned char *node, int gate, int why)
 
 /* 1: drawn here; -1: not drawn (outside, as the retail test); 0: the body decides (*why) */
 static int wd_direct_emit(WdEntry *w, int *why);
-/* b462: a crossing atomic's gated list, drawn here as sl_gate_draw's hit does it (gates, CALL, closed chunks cut) */
-static int wd_gate_emit(WdEntry *w, int *why)
-{
-    StaticList *e = (StaticList *)w->e;
-    wd_flush(); /* b481: queued entries before it, in order */
-    if (!p4_static_gate || !p4_guard_clip || !guard_code || !e->gates || !((const SlGates *)e->gates)->mesh) {
-        *why = W_GUARD;
-        return 0;
-    }
-    if (!list_room())
-        return -1;
-    prof_begin(PROF_WEMIT);
-    cull_atomic_flags = w->flags;
-    ib_before(w->g);
-    guard_world_planes();
-    float near = *(float *)((char *)current_camera + CAMERA_NEAR) * 1.01f;
-    const Geometry *g = w->g;
-    int r = sl_gate_emit(e, g, &w->model, w->lit ? g->morphTarget->normals : 0, w->modulate, near);
-    wd_cam_ok = 0; /* the cut chunks bound their own state */
-    wd_pass_valid = 0;
-    prof_end(PROF_WEMIT);
-    if (!r) {
-        *why = W_GUARD;
-        return 0;
-    }
-    e->stamp = cache_frame;
-    atomics_drawn++;
-    wd_direct++, wd_gated++;
-    return 1;
-}
 static int wd_direct_draw(WdEntry *w, const unsigned char *node, int *why)
 {
     if ((*(const int *)(node + 4) == 1) != w->valpha) {
@@ -480,8 +442,6 @@ static int wd_direct_emit(WdEntry *w, int *why)
         *why = r;
         return 0;
     }
-    if (w->gate)
-        return wd_gate_emit(w, why);
     if (w->inside < 0) {
         prof_begin(PROF_WVIS);
         w->inside = sl_inside(e, &w->model, w->sphere) != 0;
@@ -582,6 +542,14 @@ static void wd_head(const unsigned char *record, int head, int gate, int mode, i
             wd_why[W_OFF] += ran, wd_body += ran;
             continue;
         }
+        /* b529 (issue #24 audit): a field reload can put a new atomic behind a node at the same address; the cached
+           atomic, frame and geometry (GetLTM on the frame below) are used only while the node still holds them */
+        if (w->kind != WD_NONE) {
+            const char *a = (const char *)atomic;
+            if (w->atomic != atomic || *(void *const *)(a + ATOMIC_FRAME) != w->frame ||
+                (w->kind == WD_CALL && *(Geometry *const *)(a + ATOMIC_GEOMETRY) != w->g))
+                w->kind = WD_NONE, wd_stale++;
+        }
         int r = 0, why = w->kind == WD_NONE ? W_NEW : W_FORCED;
         /* b460: once in 32 frames the entry's own inputs are read again (callback, frame, geometry, its materials
            and rasters as sl_material_key sees them) instead of running the body: same, it stays direct */
@@ -641,18 +609,18 @@ static void wd_pass(unsigned char *bucket, const WdStep *step, int n)
     prof_end(PROF_WPASS);
 }
 
-/* The three passes replace the game's (psp_link weakens them). With p4_world_direct 0 every entry takes the retail
-   body above (wd_body_call), in the retail order and state steps. */
+/* The three passes replace the game's (psp_link weakens them). An entry wd_global_ok refuses takes the retail body
+   above (wd_body_call), in the retail order and state steps. */
 void movieNativeDrawPass1(unsigned char *bucket) { wd_pass(bucket, wd_pass1, sizeof wd_pass1 / sizeof *wd_pass1); }
 void movieNativeDrawPass2(unsigned char *bucket) { wd_pass(bucket, wd_pass2, sizeof wd_pass2 / sizeof *wd_pass2); }
 void movieNativeDrawPass3(unsigned char *bucket) { wd_pass(bucket, wd_pass3, sizeof wd_pass3 / sizeof *wd_pass3); }
 
 void p4_wd_report(void)
 {
-    if (p4_world_direct || wd_direct || wd_body)
+    if (wd_direct || wd_body)
     { /* three lines: p4_log cuts long ones */
-        p4_log("world direct %d check %d per 256 frames: direct %u gated %u rechecked %u moved %u culled %u body %u learned %u checks %u diffs e/list/draws/matrix %u/%u/%u/%u\n",
-               p4_world_direct, p4_world_direct_check, wd_direct, wd_gated, wd_rechecked, wd_moved, wd_culled, wd_body, wd_learned, wd_checks, wd_diff[0],
+        p4_log("world direct check %d per 256 frames: direct %u stale %u rechecked %u moved %u culled %u body %u learned %u checks %u diffs e/list/draws/matrix %u/%u/%u/%u\n",
+               p4_world_direct_check, wd_direct, wd_stale, wd_rechecked, wd_moved, wd_culled, wd_body, wd_learned, wd_checks, wd_diff[0],
                wd_diff[1], wd_diff[2], wd_diff[3]);
         p4_log("world direct body why: new %u forced %u valpha %u matrix %u visible %u list %u camera %u state %u light %u tex %u guard %u fade %u off %u far %u\n",
                wd_why[W_NEW], wd_why[W_FORCED], wd_why[W_VALPHA], wd_why[W_MATRIX], wd_why[W_VISIBLE], wd_why[W_LIST], wd_why[W_CAMERA],
@@ -668,7 +636,7 @@ void p4_wd_report(void)
         p4_col_tris = p4_col_queries = p4_col_atoms = p4_col_atris = 0;
     }
 #endif
-    if (p4_world_direct) {
+    {
         p4_log("world direct body us: forced %u guard %u fade %u; not kept none %u multi %u draws %u cb %u\n", wd_why_us[W_FORCED],
                wd_why_us[W_GUARD], wd_why_us[W_FADE], wd_not_us[N_NONE], wd_not_us[N_MULTI], wd_not_us[N_DRAWS], wd_not_us[N_CB]);
         for (int k = 0; k < WD_TOP; k++)
@@ -680,6 +648,6 @@ void p4_wd_report(void)
                        wd_top[k].split, wd_top[k].meshes, wd_top[k].retry);
     }
     memset(wd_top, 0, sizeof wd_top), memset(wd_why_us, 0, sizeof wd_why_us), memset(wd_not_us, 0, sizeof wd_not_us);
-    wd_gated = wd_rechecked = wd_direct = wd_moved = wd_culled = wd_body = wd_learned = wd_checks = 0;
+    wd_stale = wd_rechecked = wd_direct = wd_moved = wd_culled = wd_body = wd_learned = wd_checks = 0;
     memset(wd_why, 0, sizeof wd_why), memset(wd_not, 0, sizeof wd_not), memset(wd_diff, 0, sizeof wd_diff);
 }

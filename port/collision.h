@@ -19,7 +19,7 @@
    p4_col_cull_check 1: the skipped atomics are run through RW anyway and any triangle it reports is counted, and a
    subset call is compared with the full call (the triangles' vertices, in order): diffs. The full call is the one
    that reaches the game then. 0: every query goes to RW, as b465. */
-int p4_col_cull = 1, p4_col_cull_check = 0;
+int p4_col_cull_check = 0;
 static unsigned col_skipped, col_passed, col_built, col_diffs;
 static unsigned col_other[7], col_rw_calls, col_subset_calls, col_subset_tris, col_full_tris, col_sub_diffs;
 
@@ -286,7 +286,7 @@ static int col_subset(const ColBox *b, Geometry *g, void *atomic, void *intersec
 void *func_00394e70(void *atomic, void *intersection, void *callback, void *data)
 {
     int type = *(const int *)((const char *)intersection + 24); /* RpIntersection.type: 3 rpINTERSECTSPHERE */
-    if (!p4_col_cull || (type != 3 && type != 1)) {
+    if (type != 3 && type != 1) {
         col_other[type == 1 ? 0 : 1]++;
         return p4r_00394e70(atomic, intersection, callback, data);
     }
@@ -373,8 +373,8 @@ void *func_00394e70(void *atomic, void *intersection, void *callback, void *data
 void p4_col_report(void)
 {
     if (col_skipped || col_passed)
-        p4_log("collision cull %d check %d per 256 frames: skipped %u passed %u boxes built %u diffs %u; subset calls %u (RW %u) triangles %u of %u diffs %u\n",
-               p4_col_cull, p4_col_cull_check, col_skipped, col_passed, col_built, col_diffs, col_subset_calls, col_rw_calls, col_subset_tris,
+        p4_log("collision cull check %d per 256 frames: skipped %u passed %u boxes built %u diffs %u; subset calls %u (RW %u) triangles %u of %u diffs %u\n",
+               p4_col_cull_check, col_skipped, col_passed, col_built, col_diffs, col_subset_calls, col_rw_calls, col_subset_tris,
                col_full_tris, col_sub_diffs);
     if (col_other[0] + col_other[1] + col_other[2] + col_other[3] + col_other[4] + col_other[5] + col_other[6])
         p4_log("collision to RW whole: line %u other type %u; sphere without geometry %u frame %u morph %u verts %u count %u\n", col_other[0],

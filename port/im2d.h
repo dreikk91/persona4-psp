@@ -271,8 +271,7 @@ static void bind_raster_body(Raster *r, int wrap)
     }
     int psm = r->depth == 32 ? GU_PSM_8888 : r->depth == 16 ? GU_PSM_5551 : r->depth == 8 ? GU_PSM_T8 : GU_PSM_T4;
     st_enable(GU_TEXTURE_2D, 1);
-    if (p4_ge_raw) { /* b365: the same words libpspgu sends, one TEXFLUSH at the end instead of one per call */
-        unsigned *state = state_call_begin();
+    { /* b365: the same words libpspgu sends, one TEXFLUSH at the end instead of one per call */
         if (r->depth <= 8) {
             ge_word(0xC5, GU_PSM_8888 | 0xff << 8);                                   /* CMODE */
             ge_word(0xB0, (unsigned)r->palette & 0xffffff);                            /* CBP */
@@ -282,7 +281,7 @@ static void bind_raster_body(Raster *r, int wrap)
         const SwizzleHead *sw = swizzle_head(r->originalPixels);
         bound_alpha_min = sw ? sw->alpha_min : 0;
         bound_alpha_max = sw ? sw->alpha_max : 255;
-        int levels = sw && p4_mipmaps ? sw->levels : 1;
+        int levels = sw ? sw->levels : 1;
         ge_word(0xC2, (levels - 1) << 16 | (sw != 0));                                 /* TMODE */
         ge_word(0xC3, psm);                                                             /* TPSM */
         const unsigned char *level = r->originalPixels;
@@ -313,57 +312,9 @@ static void bind_raster_body(Raster *r, int wrap)
                       (GU_TEXTURE_AUTO | (unsigned)(p4_mip_bias & 0xff) << 16));            /* TLEVEL */
         ge_word(0xC7, wrap < 2 ? (wrap << 8 | wrap) : (((wrap - 2) >> 1) << 8 | ((wrap - 2) & 1))); /* TWRAP */
         ge_word(0xCB, 0);                                                               /* TFLUSH */
-        state_call_end(state);
         texture_w = r->width;
         texture_h = r->height;
-        return;
     }
-    if (r->depth <= 8) {
-        sceGuClutMode(GU_PSM_8888, 0, 0xff, 0);
-        sceGuClutLoad(1 << (r->depth - 1 ? r->depth - 3 : 0), r->palette);
-    }
-    const SwizzleHead *swizzled = swizzle_head(r->originalPixels);
-    bound_alpha_min = swizzled ? swizzled->alpha_min : 0;
-    bound_alpha_max = swizzled ? swizzled->alpha_max : 255;
-    int levels = swizzled && p4_mipmaps ? swizzled->levels : 1;
-    sceGuTexMode(psm, levels - 1, 0, swizzled != 0);
-    if (levels > 1 && r->width <= 512 && r->height <= 512) {
-        /* swizzled and power of two (see mip_levels): each level's TBP/TBW/TSIZE as sceGuTexImage writes them, but
-           one TEXFLUSH for the chain instead of one a level (from the persona4-portable fork, perf02) */
-        int wlog = 31 - __builtin_clz((unsigned)r->width), hlog = 31 - __builtin_clz((unsigned)r->height);
-        int wbytes = swizzled->wbytes, rows = swizzled->rows;
-        unsigned address = (unsigned)r->originalPixels, *cmd = gu_list->current;
-        for (int l = 0; l < levels; l++) {
-            if (l)
-                mip_level_size(r, l, &wbytes, &rows);
-            *cmd++ = ((0xa0u + l) << 24) | (address & 0xffffffu);
-            *cmd++ = ((0xa8u + l) << 24) | ((address >> 8) & 0xf0000u) | (unsigned)(wbytes * 8 / r->depth);
-            *cmd++ = ((0xb8u + l) << 24) | (unsigned)((hlog - l) << 8) | (unsigned)(wlog - l);
-            address += wbytes * rows;
-        }
-        gu_list->current = cmd;
-        sceGuTexFlush();
-    } else {
-        sceGuTexImage(0, pow2_at_least(r->width), pow2_at_least(r->height), swizzled ? swizzled->wbytes * 8 / r->depth : r->width, r->originalPixels);
-        const unsigned char *level = r->originalPixels + (swizzled ? swizzled->wbytes * swizzled->rows : 0);
-        for (int l = 1; l < levels; l++) {
-            int wbytes, rows, size = mip_level_size(r, l, &wbytes, &rows);
-            sceGuTexImage(l, r->width >> l, r->height >> l, wbytes * 8 / r->depth, level);
-            level += size;
-        }
-    }
-    sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-    if (p4_probe_tfilter)
-        sceGuTexFilter(levels > 1 ? GU_NEAREST_MIPMAP_NEAREST : GU_NEAREST, GU_NEAREST);
-    else
-        sceGuTexFilter(levels > 1 ? GU_LINEAR_MIPMAP_NEAREST : GU_LINEAR, GU_LINEAR);
-    if (p4_probe_tlevel && levels > 1)
-        sceGuTexLevelMode(GU_TEXTURE_CONST, (float)p4_probe_tlevel);
-    else
-        sceGuTexLevelMode(GU_TEXTURE_AUTO, p4_mip_bias / 16.0f);
-    tex_wrap(wrap);
-    texture_w = r->width;
-    texture_h = r->height;
 }
 
 static void bind_texture(void) { tex2d_now = 1; bind_raster((Raster *)render_state[1], GU_CLAMP); tex2d_now = 0; }
@@ -426,12 +377,9 @@ static void set_blend(unsigned alpha)
     int op = ns && !nd ? GU_REVERSE_SUBTRACT : nd && !ns ? GU_SUBTRACT : GU_ADD;
     if (ns && nd) /* both negative: the GS clamps to 0 */
         src = dst = GU_FIX, src_fix = dst_fix = 0;
-    if (p4_ge_raw) { /* b366: ALPHA (op, src, dst), SFIX, DFIX as libpspgu writes them */
-        ge_word(0xDF, op << 8 | dst << 4 | src);
-        ge_word(0xE0, src_fix);
-        ge_word(0xE1, dst_fix);
-    } else
-        sceGuBlendFunc(op, src, dst, src_fix, dst_fix);
+    ge_word(0xDF, op << 8 | dst << 4 | src); /* b366: ALPHA (op, src, dst), SFIX, DFIX as libpspgu writes them */
+    ge_word(0xE0, src_fix);
+    ge_word(0xE1, dst_fix);
 }
 
 static void bind_blend(void)
@@ -594,7 +542,6 @@ static int draw(int prim, const Vertex2D *vertices, const unsigned short *indice
 /* b146 census of 2D draws (p4_probe_2d): per texture x blend x pixel mask, draws and the screen area of their bounding
    boxes (a proxy for fill). The title's logo phase: ~36 ms of GE in 2D a frame. */
 int p4_probe_2d = 0;
-int p4_2d_nan_drop = 1;
 float p4_panel_scale = 0.0f; /* b225: the battle panel frame's scale where retail leaves it unset (census FIXES); 0: nothing, as on the PS2 */
 static unsigned nan_2d_dropped;
 unsigned p4_2d_nan_report(void) { unsigned n = nan_2d_dropped; nan_2d_dropped = 0; return n; }
@@ -1076,8 +1023,8 @@ static int draw_body(int prim, const Vertex2D *vertices, const unsigned short *i
     /* b223: 2D primitives with a non-finite position. The battle command panel (btlPanelDrawBackdropGrid, FUN_0020B3A0)
        passes a scale it never set once the panel has finished growing (retail: whatever $f20 held); here that is NaN,
        and the backdrop disc and its arcs went to the GE with NaN corners: the stripes across the attack cursor, PSP
-       only (PPSSPP drops such triangles). p4_2d_nan_drop 1 leaves a draw out when any corner is not finite. */
-    if (p4_2d_nan_drop) {
+       only (PPSSPP drops such triangles). A draw with any corner not finite is left out. */
+    {
         for (int i = 0; i < count; i++) {
             const Vertex2D *v = &vertices[indices ? indices[i] : i];
             if (!(v->x == v->x && v->y == v->y && v->x < 1e6f && v->x > -1e6f && v->y < 1e6f && v->y > -1e6f)) {
@@ -1193,7 +1140,7 @@ int p4_ui_quad_draw(const P4UiVertex *vertices)
         prof_end(PROF_2D);
         return 1;
     }
-    if (p4_2d_nan_drop) {
+    {
         for (int i = 0; i < 4; i++) {
             float x = vertices[i].u.els.screen.x, y = vertices[i].u.els.screen.y;
             if (!(x == x && y == y && x < 1e6f && x > -1e6f && y < 1e6f && y > -1e6f)) {

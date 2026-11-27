@@ -51,8 +51,7 @@ int p4r_00397c40(void *hierarchy);
    hierarchy with NaN matrices. RpHAnimKeyFrameInterpolate (p4r_003955a0) divides by t2 - t1; two keys with the same
    time give 0/0. The EE's FPU gives the largest finite value there and huge x 0 = 0, so the result is key 1; the PSP
    gives NaN, and the bone and its children go with it. Each interpolated frame (RpHAnimInterpFrame: keyFrame1,
-   keyFrame2, q, t) is checked before the matrices are built; one with a NaN or infinity takes key 1's q and t. */
-int p4_hanim_nan_fix = 1;
+   keyFrame2, q, t) is checked before the matrices are built; one with a NaN or infinity takes key 1's q and t. Always on. */
 static unsigned hanim_nan_logged;
 /* b158: bones 38-43 bad at skinning but not right after any update: which hierarchy, updated when? */
 static struct { const void *h; unsigned frame, count; } hanim_seen[64];
@@ -127,11 +126,10 @@ static void head_trace(unsigned *h)
    go bad inside mainDraw, after a clean hierarchy update, from bone 38 (the head) down. The look state (MdlLookState
    at controllerState: flags, blend, limits, rotation, limitedRotation, scale, target, offsets) keeps its rotation
    between ticks and slerps it toward the target, so one NaN stays for good: a headless member for the rest of the
-   battle. p4_head_trace logs the call where the head goes bad (look state before and after). p4_look_fix 1: a look
-   rotation that is not finite before the call is reseeded from the animation (flag 0x200, the game's own reset);
+   battle. p4_head_trace logs the call where the head goes bad (look state before and after). The fix (always on): a
+   look rotation that is not finite before the call is reseeded from the animation (flag 0x200, the game's own reset);
    one made non-finite by the call is put back; a body pose (no parent transform) with a bad head is redone as the
    plain bone update for that tick. */
-int p4_look_fix = 1;
 static unsigned look_calls, look_bad_before, look_bad_after, look_redone, look_logged;
 static unsigned char look_before[0x50] __attribute__((aligned(4)));
 static int look_head_node(const unsigned *h)
@@ -199,10 +197,8 @@ void p4_look_check(void *hierarchy, void *controller, void *parent, int after)
         memset(look_probe_n, 0, sizeof look_probe_n);
         if (head_big(rot, 4)) {
             look_bad_before++;
-            if (p4_look_fix) {
-                rot[0] = rot[1] = rot[2] = 0.0f, rot[3] = 1.0f;
-                *(unsigned short *)c |= 0x200;
-            }
+            rot[0] = rot[1] = rot[2] = 0.0f, rot[3] = 1.0f;
+            *(unsigned short *)c |= 0x200;
         }
         return;
     }
@@ -222,8 +218,6 @@ void p4_look_check(void *hierarchy, void *controller, void *parent, int after)
         look_print("after ", c);
         look_probe_print();
     }
-    if (!p4_look_fix)
-        return;
     if (bad_rot) {
         memcpy(rot, look_before + 16, 16);
         if (head_big(rot, 4))
@@ -239,8 +233,8 @@ static void look_report(void)
 {
     extern unsigned p4_acos_clamped;
     extern unsigned p4_2d_nan_report(void);
-    p4_log("look fix %d: calls %u bad rotation before %u bad after %u redone %u; acos inputs clamped %u; 2d draws with NaN corners dropped %u\n",
-           p4_look_fix, look_calls, look_bad_before, look_bad_after, look_redone, p4_acos_clamped, p4_2d_nan_report());
+    p4_log("look fix: calls %u bad rotation before %u bad after %u redone %u; acos inputs clamped %u; 2d draws with NaN corners dropped %u\n",
+           look_calls, look_bad_before, look_bad_after, look_redone, p4_acos_clamped, p4_2d_nan_report());
     look_calls = look_bad_before = look_bad_after = look_redone = p4_acos_clamped = 0;
 }
 /* b159: after every task, the hierarchies updated in the last 2 frames are checked; the first task after which one has
@@ -362,8 +356,7 @@ static void hanim_sanitize(unsigned *h)
 }
 /* b309 p4_hanim_key_span: two keys with the same time (a zero-length span) give 0/0 in both interpolate callbacks;
    the EE's FPU made that key 1, the PSP makes NaN, which every reader before the bone update (layer blends, look-at)
-   took as it was. The frame takes key 1 here instead (fix from MeMeNT0xMoRii's fork). 0: retail, as b308. */
-int p4_hanim_key_span = 1;
+   took as it was. The frame takes key 1 here instead (fix from MeMeNT0xMoRii's fork). Always on. */
 unsigned p4_hanim_equal_keys[2];
 void p4r_003955a0(void *out, void *in1, void *in2, float time, void *data);
 void p4r_00415bc0(void *out, void *in1, void *in2, float time, void *data);
@@ -371,7 +364,7 @@ void func_003955a0(void *out, void *in1, void *in2, float time, void *data)
 {
     const HAnimKey *a = in1, *b = in2;
     IFrame *frame = out;
-    if (p4_hanim_key_span && a->time == b->time) {
+    if (a->time == b->time) {
         memcpy(frame->q, a->q, sizeof frame->q);
         memcpy(frame->t, a->t, sizeof frame->t);
         p4_hanim_equal_keys[0]++;
@@ -382,7 +375,7 @@ void func_003955a0(void *out, void *in1, void *in2, float time, void *data)
 void func_00415bc0(void *out, void *in1, void *in2, float time, void *data)
 {
     const CKey *a = in1, *b = in2;
-    if (p4_hanim_key_span && a->time == b->time) {
+    if (a->time == b->time) {
         decode_hanim_key((float *)((char *)out + 8), a, data);
         p4_hanim_equal_keys[1]++;
         return;
@@ -399,7 +392,7 @@ void func_00415bc0(void *out, void *in1, void *in2, float time, void *data)
 int p4_anim_cull = 0, p4_anim_far = 0, p4_anim_far_step = 2; /* b173: far on (b172 class, by eye: fine) */
 float p4_anim_far_depth = 500.0f;
 enum { ANIM_STATES = 128 };
-typedef struct { const void *h, *matrices, *interp; int nodes; unsigned drawn, updated, advanced, moved, used[8]; float depth, pending, at[3]; unsigned char stale, skinned, lod; } AnimState;
+typedef struct { const void *h, *matrices, *interp; int nodes; unsigned drawn, updated, advanced, moved, used[8]; float depth, pending, at[3]; unsigned char stale, skinned; } AnimState;
 static AnimState anim_state[ANIM_STATES];
 /* b228: each state's interpolator in an array of its own. AddAnimTime looked an interpolator up by scanning the
    128 states (80 bytes each, a cache line apiece), ~10k cycles a call, ~100 calls a drawn tick, most of them for
@@ -931,6 +924,9 @@ void p4r_003d5830(void *interpolator);
 void func_003d5830(void *interpolator) /* Destroy */
 {
     lazy_obsolete_now(interpolator);
+    for (int i = 0; i < ANIM_STATES; i++) /* b529: a new interpolator at this address is not this state's */
+        if (anim_interp_of[i] == interpolator)
+            anim_interp_of[i] = 0, anim_state[i].interp = 0;
     for (int i = 0; i < LAZY_SLOTS; i++) { /* a recorded blend or rebase that reads it cannot be replayed */
         LazyAnim *e = &lazy_slot[i];
         if (e->ip && e->first == interpolator)
@@ -1088,8 +1084,7 @@ static int hanim_update_now(void *hierarchy)
     unsigned t_w = HANIM_NOW();
     p4_anim_materialize((void *)((unsigned *)hierarchy)[8]); /* b202: currentAnim's frames, if they wait */
     unsigned t_s = HANIM_NOW();
-    if (p4_hanim_nan_fix)
-        hanim_sanitize(hierarchy);
+    hanim_sanitize(hierarchy);
     hanim_t_wait += t_s - t_w, hanim_t_scan += HANIM_NOW() - t_s;
     int r = p4_hanim_c ? p4_hanim_update(hierarchy) : p4r_00397c40(hierarchy);
     if (p4_pose_trace_from && cache_frame >= (unsigned)p4_pose_trace_from) /* game frames: PPSSPP's Tab cannot move it */
@@ -1353,7 +1348,7 @@ static float sync_max_diff;
    for it, before the objects on it are synced, and before a child frame that is not a bone multiplies its LTM. The
    three recursive syncs skip the multiply for a lazy frame. Readers of frame memory that go around all of these are
    not covered: "lost" counts a lazy frame whose hierarchy was not found (its data stays old). */
-int p4_frame_lazy = 1; /* b473: on (PSP Heaven standing -0.6 ms, kmat 0.61 -> 0.41 M; b360/b366 dialogue -1.5..1.7 ms; lost 0; route shots fine) */
+/* b473: on (PSP Heaven standing -0.6 ms, kmat 0.61 -> 0.41 M; b360/b366 dialogue -1.5..1.7 ms; lost 0; route shots fine) */
 enum { FRAME_LAZY = 0x40, LAZY_HIER = 64 };
 static struct { const unsigned *h; const unsigned char *root; unsigned tick; } flz_h[LAZY_HIER];
 static unsigned flz_nodes, flz_written[4], flz_lost, flz_evicted; /* written: 0 GetLTM, 1 objects, 2 child, 3 evicted */
@@ -1429,6 +1424,23 @@ static void flz_note(const unsigned *h, const unsigned char *root)
         free_k = old_k;
     }
     flz_h[free_k].h = h, flz_h[free_k].root = root, flz_h[free_k].tick = p4_anim_tick;
+}
+/* b529 (issue #24): RpHAnimHierarchyDestroy (retail 0x397120) forgets the hierarchy. A dead entry whose root address
+   came back with a new model matched in flz_find and read the freed node info (PSP-3000 bus error after a field reload). */
+void p4r_00397120(void *hierarchy);
+void func_00397120(void *hierarchy)
+{
+    for (int k = 0; k < LAZY_HIER; k++)
+        if (flz_h[k].h == hierarchy)
+            flz_h[k].h = 0;
+    /* its anim state stays in the probe chain (h kept) but matches nothing: anim_find resets it when the address
+       returns (nodes -1), anim_by_interp no longer finds it, bone_census_report skips it (not skinned) */
+    for (int k = 0; k < ANIM_STATES; k++)
+        if (anim_state[k].h == hierarchy) {
+            anim_state[k].nodes = -1, anim_state[k].interp = 0, anim_state[k].skinned = 0;
+            anim_interp_of[k] = 0;
+        }
+    p4r_00397120(hierarchy);
 }
 
 enum { SYNC_KEPT = 0x200, SYNC_STALE = 0x100 };
@@ -1584,7 +1596,7 @@ int p4_hanim_update(unsigned *h)
         }
     }
     int update_ltm = flags & 0x2000;
-    int lazy = p4_frame_lazy && update_ltm && !(flags & 0x4001) && h[5];
+    int lazy = update_ltm && !(flags & 0x4001) && h[5];
     if (lazy)
         flz_note(h, *(unsigned char **)((char *)h[5] + 160));
     if (update_ltm) {
@@ -1732,8 +1744,8 @@ int p4_hanim_dispatch(unsigned *h, int (*original)(void *))
 static void hanim_report(void)
 {
     fc_report();
-    p4_log("frame lazy %d: deferred %u, written on GetLTM %u objects %u child %u evicted %u; lost %u, hierarchies evicted %u per 256 frames\n",
-           p4_frame_lazy, flz_nodes, flz_written[0], flz_written[1], flz_written[2], flz_written[3], flz_lost, flz_evicted);
+    p4_log("frame lazy: deferred %u, written on GetLTM %u objects %u child %u evicted %u; lost %u, hierarchies evicted %u per 256 frames\n",
+           flz_nodes, flz_written[0], flz_written[1], flz_written[2], flz_written[3], flz_lost, flz_evicted);
     flz_nodes = flz_lost = flz_evicted = 0;
     memset(flz_written, 0, sizeof flz_written);
     p4_log("frame sync skip fresh %d check %d: multiplies %u kept %u; checks %u diffs %u max diff %d/1000000; top bones %u stale %u per 256 frames\n",
@@ -1749,11 +1761,10 @@ static void hanim_report(void)
            (unsigned)(hanim_t_pre / 1000), (unsigned)(hanim_t_math / 1000), (unsigned)(hanim_t_frame / 1000));
     hanim_t_wait = hanim_t_scan = hanim_t_pre = hanim_t_math = hanim_t_frame = 0;
     hanim_t_nodes = hanim_t_framed = hanim_t_callback = hanim_t_calls = 0;
-    p4_log("skin free waits %u (wait %d); skin dummy words %u (dummy %d)\n", skin_free_waits, p4_skin_free_wait, skin_dummies, p4_skin_dummy);
-    p4_log("skin lod depth %d keep %d: draws simplified %u full %u\n", (int)p4_skin_lod_depth, p4_skin_lod_keep, skin_lod_draws, skin_full_draws);
-    p4_log("skin far depth %d keep %d bones %d: draws %u fallbacks %u; builds %u bones %u of %u, %u ms\n", (int)p4_skin_far_depth, p4_skin_far_keep,
-           p4_skin_far_bones, skin_far_draws, skin_far_fallbacks, skin_far_builds, skin_far_bones_kept, skin_far_bones_in, skin_far_us / 1000);
-    skin_lod_draws = skin_full_draws = skin_far_draws = skin_far_builds = skin_far_bones_kept = skin_far_bones_in = skin_far_us = skin_far_fallbacks = 0;
+    p4_log("skin free waits %u; skin dummy words %u (dummy %d)\n", skin_free_waits, skin_dummies, p4_skin_dummy);
+    p4_log("skin few-bone entries: fallbacks %u; builds %u bones %u of %u, %u ms\n",
+           skin_far_fallbacks, skin_far_builds, skin_far_bones_kept, skin_far_bones_in, skin_far_us / 1000);
+    skin_far_builds = skin_far_bones_kept = skin_far_bones_in = skin_far_us = skin_far_fallbacks = 0;
     skin_free_waits = skin_dummies = 0;
     hanim_fused_nodes = hanim_hook_nodes = 0;
     hanim_calls = hanim_checks = hanim_diffs = hanim_vfpu_unaligned = 0;

@@ -172,7 +172,7 @@ be switched on in this session. No other local build was silently substituted.
 The MatFX/RTT ablations need a separate scene with active passes before any
 general performance conclusion; no such second-scene result is claimed here.
 
-See [all 230 runtime controls](runtime_controls_b366.md) for defaults,
+See [the b366 runtime controls](archive/runtime_controls_b366.md) (current list: [runtime_controls.md](runtime_controls.md)) for defaults,
 dependencies, modes, source locations and tool support.
 
 ## Subsequent live state: animation bug reproduction

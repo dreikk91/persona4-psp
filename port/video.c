@@ -126,12 +126,8 @@ enum { VOL_WORK_MAX = 0x10000 + 256 + 4096 };
 static void *vol_ddr, *vol_output, *vol_packet, *vol_work, *vol_params;
 /* b174: sceMpegCreate hung twice after a long stretch of play since the last movie (b169 P4CTOP2, b172 P4CT004, both
    waiting in sceMpeg), with the buffers in the heap and in the volatile block alike; back-to-back movies never did.
-   p4_video_keep: the SceMpeg made for the first movie (and the volatile block it lives in) stays for the session;
-   later movies reuse it, so Create runs once. A movie that fails drops it. */
-/* A decoder kept across gameplay is not a clean AVC session after SAS use.
- * Keep the old reuse experiment available for diagnosis, but close the normal
- * session completely while SAS is still paused. */
-int p4_video_keep = 0;
+   Reusing one SceMpeg for the session (p4_video_keep, removed in b528) is not a clean AVC session after SAS use:
+   every movie closes its session completely while SAS is still paused. */
 /* b1402 p4_video_low: the title-return hang stops inside sceMpegInit (a Media Engine RPC that never answers), and
    every frozen game had the MPEG library in the extra 32 MB (b250 0x0B5C0000, b400 0x0B9C0000): the heap takes all of
    partition 2 but the top 4 MB (PSP_HEAP_THRESHOLD_SIZE_KB), so every module loaded later lands above 0x0A000000.
@@ -175,9 +171,8 @@ static unsigned mpeg_library_at(void)
     }
     return 0;
 }
-static int vol_held, kept;
-static SceMpeg kept_mpeg;
-static SceMpegRingbuffer rb; /* a kept SceMpeg points at it */
+static int vol_held;
+static SceMpegRingbuffer rb;
 static unsigned last_movie_end;
 static int volatile_carve(unsigned params_bytes)
 {
@@ -271,19 +266,14 @@ int p4_video_play(const char *directory, const char *name, int muted)
     memset((char *)work + work_size, 0xa5, 256);
     memset((char *)params + h.sps_size + h.pps_size, 0xa5, 256);
     log_line("work %p size %x packet %p params %p ddr %p output %p volatile %d mute %d", work, work_size, packet, params, ddr, output, volatile_locked, mute);
-    log_line("start: %u ms since the last movie, keep %d kept %d", last_movie_end ? (sceKernelGetSystemTimeLow() - last_movie_end) / 1000 : 0,
-             p4_video_keep, kept);
-    if (kept && volatile_locked && !heap_work) {
-        mpeg = kept_mpeg; created = rb_created = 1;
-        log_line("mpeg reused");
-    } else {
+    log_line("start: %u ms since the last movie", last_movie_end ? (sceKernelGetSystemTimeLow() - last_movie_end) / 1000 : 0);
+    {
         memset(&rb, 0, sizeof rb);
         r = sceMpegRingbufferConstruct(&rb, 0, NULL, 0, NULL, NULL);
         if (r < 0) { log_line("ringbuffer %08x", r); goto done; } rb_created = 1;
         log_line("mpeg create begin");
         r = sceMpegCreate(&mpeg, work, work_size, &rb, 512, 4, (int)ddr);
         log_line("mpeg create %08x ddr %p", r, ddr); if (r < 0) goto done; created = 1;
-        if (p4_video_keep && volatile_locked && !heap_work) kept = 1, kept_mpeg = mpeg;
     }
     memset(&au_storage, 0xff, sizeof au_storage);
     r = sceMpegInitAu(&mpeg, (char *)ddr + 0x10000, &au);
@@ -390,20 +380,18 @@ done:
         log_line("close drain r %08x pictures %ld", r, pictures);
         if (r < 0) result = -1;
     }
-    if (kept && result < 0) { log_line("dropping the kept mpeg after a failure"); kept = 0; }
-    int keep_now = kept && created && mpeg == kept_mpeg;
-    if (created && !keep_now) {
+    if (created) {
         log_line("mpeg delete begin"); sceMpegDelete(&mpeg); log_line("mpeg delete end");
     }
-    if (rb_created && !keep_now) {
+    if (rb_created) {
         sceMpegRingbufferDestruct(&rb); log_line("ringbuffer destruct end");
     }
     /* Keep every decoder buffer valid through Finish and module shutdown.
      * b253 returned volatile RAM/freed heap buffers before finishing MPEG. */
-    if (!keep_now && (!p4_video_keep || result < 0)) p4_video_shutdown();
+    p4_video_shutdown();
     if (heap_work || !volatile_locked) { free(ddr); free(work); free(output); }
     if (!volatile_locked) { free(packet); free(params); }
-    if (volatile_locked && !kept && vol_held && !initialized) {
+    if (volatile_locked && vol_held && !initialized) {
         int unlock = sceKernelVolatileMemUnlock(0);
         log_line("volatile unlock %08x", unlock); if (unlock >= 0) vol_held = 0;
     }
@@ -415,10 +403,6 @@ done:
 
 void p4_video_shutdown(void)
 {
-    if (kept) {
-        log_line("kept mpeg delete begin"); sceMpegDelete(&kept_mpeg); log_line("kept mpeg delete end");
-        sceMpegRingbufferDestruct(&rb); kept = 0;
-    }
     if (initialized) {
         log_line("mpeg finish begin"); sceMpegFinish(); log_line("mpeg finish end");
         initialized = 0;

@@ -1,5 +1,18 @@
 # Changelog
 
+## b529 pre-release (2026-11-27)
+
+The issue #24 crash fix, a stale-pointer audit and fewer runtime paths (b525-b528: no new optimisation). Checked in PPSSPP only (battle_b177 and margaret routes against b524, the field-reload stress run); not yet run on a PSP. Host validation: [docs/build_validation_b529.md](docs/build_validation_b529.md).
+
+- b525: failed experiments removed with their code: `p4_ge_split*`, `p4_static_chunk`, `p4_static_gate`, `p4_guard_snap`, `p4_strip_prims`, `p4_state_call`, `p4_chain_strips`, `p4_compact_immediate`, `p4_eff_rotate`, the distance skin LOD `p4_skin_lod_*`/`p4_skin_far_*`.
+- b526: correctness fixes always on: `p4_hanim_nan_fix`, `p4_hanim_key_span`, `p4_look_fix`, `p4_skin_finite`, `p4_skin_free_wait`, `p4_2d_nan_drop`.
+- b527: proven paths without their off switch: `p4_ge_raw`, `p4_ge_compile`, `p4_skin_strip`, `p4_strip_pack`, `p4_world_direct`, `p4_col_cull`, `p4_frame_lazy`, `p4_skin_guard_box`, `p4_swizzle_textures`, `p4_mipmaps`; the unreachable s16 static-list position packing removed.
+- b528: `p4_ge_static_clip`, `p4_sl_trust`, `p4_mesh_strip_pack`, `p4_video_keep` removed.
+- b529 (issue #24): a destroyed bone hierarchy is dropped from the lazy-frame table; a new model at a freed root address matched the dead entry and read freed memory (bus error in `flz_find` after a dungeon floor reload, PSP-3000).
+- b529 audit of port tables that keep game pointers: a destroyed hierarchy's anim state and a destroyed interpolator no longer match a new object at the same address; a world-direct entry is used only while its bucket node still holds the same atomic, frame and geometry (`stale` in the world direct log line). Mesh, skin, static-list, key-map, render-target and cloud caches were checked: they compare pointers or own their copies.
+- b529 profiling build: `p4_poison_check 1` fills every freed heap block with `0xFFEEFEEF`; `tools/psp_stress.py` turns it on and warps between three fields in PPSSPP. With the #24 fix taken out it faulted in `p4_hanim_update` at the first warp; with it, 9 warps clean.
+- [docs/runtime_controls.md](docs/runtime_controls.md) is generated from the source by `tools/p4_controls.py`; the b366 list and older validation records moved to [docs/archive](docs/archive/README.md). [AGENTS.md](AGENTS.md) holds the working rules.
+
 ## b495 pre-release (2026-11-25)
 
 Fixes on top of b494. Not yet run on a PSP in this release session.
@@ -100,7 +113,7 @@ The earlier Paradise 30 FPS report was withdrawn after the test scene was identi
 
 ### Validation and limitations
 
-See [b450 validation](docs/build_validation_b450.md) for the actual frozen-package checks. Selected older hardware measurements are in [the b366 audit](docs/hardware_b366.md). Movie hangs, heap fragmentation after scene changes, fusion glow flicker and slower heavy scenes remain open. No complete playthrough or stable whole-game 30 FPS is claimed.
+See [b450 validation](docs/archive/build_validation_b450.md) for the actual frozen-package checks. Selected older hardware measurements are in [the b366 audit](docs/hardware_b366.md). Movie hangs, heap fragmentation after scene changes, fusion glow flicker and slower heavy scenes remain open. No complete playthrough or stable whole-game 30 FPS is claimed.
 
 ## Earlier b354-b388 release
 
@@ -167,5 +180,5 @@ not how long it takes on a device. The test scene is the Margaret dialogue
 - [docs/hardware_b366.md](docs/hardware_b366.md): the b366 PSP audit (34 arms, 13,056 frames).
 - [docs/cpu_live_b366.md](docs/cpu_live_b366.md): live CPU capture.
 - [docs/animation_psp.md](docs/animation_psp.md): P4 animation costs and pose-path measurements.
-- [docs/runtime_controls_b366.md](docs/runtime_controls_b366.md): all 230 runtime switches (translated to English).
+- [docs/archive/runtime_controls_b366.md](docs/archive/runtime_controls_b366.md): all 230 runtime switches (translated to English).
 - [docs/ge_frame.md](docs/ge_frame.md), [docs/visual_issues.md](docs/visual_issues.md): GE frame and fixed visual issues.
