@@ -213,7 +213,9 @@ static int col_seg_box(const float *a, const float *b, const float *lo, const fl
 static int col_subset(const ColBox *b, Geometry *g, void *atomic, void *intersection, void *callback, void *data)
 {
     int line = *(const int *)((const char *)intersection + 24) == 1; /* b472: RwLine start, end; else RwSphere */
-    static unsigned short sub[COL_SUB_MAX * 4], pick[COL_SUB_MAX];
+    /* b517: in the image's VU block (vu_place.h) */
+    _Static_assert(COL_SUB_MAX * 4 * 2 <= VU_COL_SUB_SIZE && COL_SUB_MAX * 2 <= VU_COL_PICK_SIZE, "vu_place.h: sub/pick grew");
+    unsigned short *sub = &VU_PLACE(unsigned short, VU_COL_SUB), *pick = &VU_PLACE(unsigned short, VU_COL_PICK);
     static unsigned char *seen;
     static int seen_n;
     const ColGrid *gr = b->grid;

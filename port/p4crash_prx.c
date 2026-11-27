@@ -1,8 +1,8 @@
 /* b495 p4crash.prx: the crash catcher's kernel half (issue #21). A user EBOOT cannot register exception handlers, so
    this small kernel module, embedded in the EBOOT (crash.c) and loaded through the CFW's KUBridge, registers the
    default exception handler. On an exception in user code it saves the registers into a block the EBOOT owns and
-   resumes the faulting thread, still in user mode, in the EBOOT's report function (crash.c p4_crash_trap) on the
-   EBOOT's crash stack and $gp: the report is written by the game's own code, with its log ring and file paths.
+   resumes the faulting thread, still in user mode, in the EBOOT's report function (crash.c p4_crash_trap) on its own
+   stack 4 KB below the fault (b523; the EBOOT's crash stack before) and the EBOOT's $gp: the report is written by the game's own code, with its log ring and file paths.
    Exceptions in kernel code (the firmware's own break in a foreign context, seen at boot on other ports) are counted
    and that context parked, as the psp-developer notes measured on a PSP-3000; passing them on killed the console.
    Not compiled into the EBOOT: tools/psp_link.py build_crash_prx builds it as its own kernel PRX. */
@@ -12,6 +12,19 @@ PSP_MODULE_INFO("p4crash", PSP_MODULE_KERNEL, 1, 0);
 PSP_NO_CREATE_MAIN_THREAD();
 
 int sceKernelRegisterDefaultExceptionHandler(void *func);
+int sceKernelReleaseDefaultExceptionHandler(void *func);
+/* b523: SystemCtrlForKernel's sctrlHENFindFunction (p4crash_import.S, NID 0x159AF5CC): a kernel function by module,
+   library and its old NID. b495-b522 called the plain pspsdk import, which on this PSP-3000 (6.61, ARK-4) returned
+   80020034 at every boot, from the XMB too: the handler was never on. The ICO port's exception.prx registers through
+   the finder first (checked on the same console) and falls back to the import. */
+unsigned p4c_find_function(const char *module, const char *library, unsigned nid);
+static int linked(void *stub) { return (*(volatile unsigned *)stub >> 26) == 2; } /* an unlinked stub must not be called */
+static void *exc_manager(unsigned nid, void *import)
+{
+    void *f = linked((void *)p4c_find_function) ? (void *)p4c_find_function("sceExceptionManager", "ExceptionManagerForKernel", nid) : 0;
+    return f ? f : linked(import) ? import : 0;
+}
+static void *registered;
 
 /* the block layout, shared with crash.c (words) */
 enum { R_GPR = 0, R_LO = 32, R_HI, R_BADVADDR, R_CAUSE, R_EPC, R_STATUS, R_FCR31, R_ENTRIES, R_FOREIGN, R_FOREIGN_EPC,
@@ -33,6 +46,7 @@ void p4c_park(void)
 __asm__(
     ".set push\n.set noreorder\n.set noat\n"
     ".text\n.globl p4c_handler\np4c_handler:\n"
+    "  nop\n  nop\n"                     /* the exception manager's link words: must be 0 at registration */
     "  mfc0  $v0, $14\n"                 /* EPC */
     "  bltz  $v0, 2f\n"                  /* kernel code: not ours */
     "  nop\n"
@@ -67,7 +81,23 @@ __asm__(
     "  cfc1 $t0, $31\n  sw $t0, 152($v0)\n"
     "  ctc1 $0, $31\n"                       /* an FPU trap would fire again in the report */
     "1:\n"
-    "  lui   $v1, %hi(p4c_stack)\n  lw $sp, %lo(p4c_stack)($v1)\n"  /* the faulting stack may be the fault */
+    /* b523: the report runs on the faulting thread's own stack, 4 KB below its sp (the frames crash.c dumps stay
+       intact above it), as ICO's exception.prx does: the kernel kills a thread whose sp is outside its own stack
+       (ICO's fibers on malloc'd stacks switched the PSP off). The EBOOT's crash stack only when sp is not user memory. */
+    "  lw    $v1, 116($v0)\n"                /* the fault sp */
+    "  lui   $a0, 0x0881\n"
+    "  sltu  $a0, $v1, $a0\n"
+    "  bnez  $a0, 4f\n"
+    "  nop\n"
+    "  lui   $a0, 0x0c00\n"
+    "  sltu  $a0, $v1, $a0\n"
+    "  beqz  $a0, 4f\n"
+    "  addiu $sp, $v1, -4096\n"              /* delay slot; 4 replaces it */
+    "  li    $a0, -16\n"
+    "  b     3f\n"
+    "  and   $sp, $sp, $a0\n"
+    "4:\n"
+    "  lui   $v1, %hi(p4c_stack)\n  lw $sp, %lo(p4c_stack)($v1)\n"
     "3:\n"
     "  move  $a0, $v0\n"                     /* p4_crash_trap(regs) */
     "  lui   $v1, %hi(p4c_gp)\n  lw $gp, %lo(p4c_gp)($v1)\n"
@@ -96,9 +126,13 @@ int module_start(SceSize args, void *argp)
         return 1;
     const P4CrashArgs *a = argp;
     p4c_regs = a->regs, p4c_trap = a->trap, p4c_stack = a->stack, p4c_gp = a->gp;
-    int r = sceKernelRegisterDefaultExceptionHandler((void *)((unsigned)p4c_handler | 0x80000000u));
+    void *h = (void *)((unsigned)p4c_handler | 0x80000000u);
+    int (*reg)(void *) = (int (*)(void *))exc_manager(0x565C0B0Eu, (void *)sceKernelRegisterDefaultExceptionHandler);
+    int r = reg ? reg(h) : -1;
+    if (r >= 0)
+        registered = h;
     p4c_regs[R_INSTALL] = (unsigned)r + 1; /* 0: never ran; r + 1 otherwise (1: registered) */
-    return 0; /* stays resident either way: the EBOOT reads R_INSTALL */
+    return 0; /* stays resident either way (a non-zero return unloads the module): the EBOOT reads R_INSTALL */
 }
 
 /* exported, so a stop really runs (pspsdk's default exports have no module_stop). The handler stays: the module is
@@ -106,5 +140,9 @@ int module_start(SceSize args, void *argp)
 int module_stop(SceSize args, void *argp)
 {
     (void)args, (void)argp;
+    int (*rel)(void *) = (int (*)(void *))exc_manager(0x291FF031u, (void *)sceKernelReleaseDefaultExceptionHandler);
+    if (rel && registered)
+        rel(registered); /* nothing in the kernel may point into this module once it goes (ICO's exception.prx) */
+    registered = 0;
     return 0;
 }

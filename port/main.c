@@ -13,9 +13,11 @@ PSP_MODULE_INFO("P4", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 PSP_MAIN_THREAD_STACK_SIZE_KB(1024);
 PSP_HEAP_SIZE_KB(-1); /* the heap is claimed before main */
-PSP_HEAP_THRESHOLD_SIZE_KB(4096); /* left free: thread stacks */
+/* left free: thread stacks and modules loaded later. b518: 4096 -> 2048; the b495 PSP-3000 log still had 4336 KB free
+   at every movie (MPEG library in the low hole, SAS and AVCODEC loaded), PPSSPP's lowest 4128 KB; no utility dialogs */
+PSP_HEAP_THRESHOLD_SIZE_KB(2048);
 
-#define BUILD 495
+#define BUILD 524
 #define P4_IMAGE_SIZE 0x40B000 /* retail 0x52da00..0x938a00: data and bss */
 #include "paths.h"
 #define GAME_DIR "ms0:/PSP/GAME/P4/" /* only until p4_paths_init: the log before it */
@@ -137,10 +139,15 @@ void *__real_malloc(size_t); void *__real_calloc(size_t, size_t); void *__real_r
 void *__real_memalign(size_t, size_t); void __real_free(void *);
 enum { MS_SLOTS = 1 << 16, MS_SITES = 1024 };
 typedef struct { void *p; unsigned size, site; } MsBlock;
-typedef struct { unsigned ra, live, peak, blocks; } MsSite;
+typedef struct { unsigned ra, live, peak, blocks, game; } MsSite;
 static MsBlock *ms_table; /* open addressing, backward-shift deletion */
 static MsSite ms_site[MS_SITES], ms_copy[MS_SITES];
 static unsigned ms_used, ms_live, ms_peak, ms_lost, ms_allocs;
+/* b518: the game's share. tools/psp_hw_debug.py puts these two labels around the game's objects (stubs, reasm and
+   the census), so a caller between them is the game's code (chkmem*, RenderWare...), any other the port's or libc's.
+   Weak: a link without them (psp_link.py) leaves both 0 and every caller counts as the port's. */
+extern char p4_game_text_begin[] __attribute__((weak)), p4_game_text_end[] __attribute__((weak));
+static unsigned ms_game_live, ms_game_peak, ms_port_live, ms_port_peak;
 
 static unsigned ms_hash(unsigned v, unsigned bits) { return (v >> 3) * 2654435761u >> (32 - bits); }
 
@@ -159,12 +166,19 @@ static void ms_add(void *p, unsigned size, unsigned ra)
     unsigned s = ms_hash(ra, 10);
     while (ms_site[s].ra && ms_site[s].ra != ra)
         s = (s + 1) & (MS_SITES - 1);
+    if (!ms_site[s].ra)
+        ms_site[s].game = ra >= (unsigned)p4_game_text_begin && ra < (unsigned)p4_game_text_end;
     ms_site[s].ra = ra;
     if ((ms_site[s].live += size) > ms_site[s].peak)
         ms_site[s].peak = ms_site[s].live;
     ms_site[s].blocks++;
     if ((ms_live += size) > ms_peak)
         ms_peak = ms_live;
+    if (ms_site[s].game) {
+        if ((ms_game_live += size) > ms_game_peak)
+            ms_game_peak = ms_game_live;
+    } else if ((ms_port_live += size) > ms_port_peak)
+        ms_port_peak = ms_port_live;
     ms_allocs++;
     unsigned i = ms_hash((unsigned)p, 16);
     while (ms_table[i].p)
@@ -187,6 +201,7 @@ static void ms_remove(void *p)
         site->live -= ms_table[i].size;
         site->blocks--;
         ms_live -= ms_table[i].size;
+        *(site->game ? &ms_game_live : &ms_port_live) -= ms_table[i].size;
         ms_used--;
         for (unsigned j = i;;) { /* pull later entries of the run back over the hole */
             j = (j + 1) & (MS_SLOTS - 1);
@@ -201,6 +216,16 @@ static void ms_remove(void *p)
         ms_table[i].p = 0;
     }
     pspSdkEnableInterrupts(intr);
+}
+
+static unsigned ms_site_ra(const void *p) /* the memstat caller of a block (0: not tracked) */
+{
+    if (!ms_table)
+        return 0;
+    unsigned i = ms_hash((unsigned)p, 16);
+    while (ms_table[i].p && ms_table[i].p != p)
+        i = (i + 1) & (MS_SLOTS - 1);
+    return ms_table[i].p ? ms_site[ms_table[i].site].ra : 0;
 }
 
 #define MS_RA ((unsigned)__builtin_return_address(0))
@@ -227,6 +252,24 @@ static unsigned heap_largest(void)
 }
 void p4_heap_map(const char *why);
 void p4_memstat_report(void);
+/* b520 (issue #23): one 2.5 MB run held from boot. A big block the heap cannot give (F023_003.P01 wanted 1.98 MB with
+   14 MB free in pieces, largest 1.9 MB) gets the reserve back first, on any thread (the caches only go on the drawing
+   thread). The drawing thread takes it again when the heap has such a run (p4_heap_reserve_tick); taking it may leave a
+   later load short, which then releases it again. 0 KB: off. */
+int p4_heap_reserve_kb = 2560;
+static void *heap_reserve;
+static unsigned heap_reserve_bytes(void) { return (unsigned)p4_heap_reserve_kb << 10; }
+void p4_heap_reserve_tick(void)
+{
+    if (heap_reserve || p4_heap_reserve_kb <= 0)
+        return;
+    struct mallinfo m = mallinfo(); /* 2 MB left besides it, or the game's next blocks give it straight back */
+    if (m.fordblks + p4_heap_unclaimed() < heap_reserve_bytes() + (2u << 20))
+        return;
+    static int announced;
+    if ((heap_reserve = __real_malloc(heap_reserve_bytes())) && announced++ < 8)
+        p4_log("heap reserve: %u KB held at %x\n", heap_reserve_bytes() >> 10, (unsigned)heap_reserve);
+}
 static unsigned heap_release(unsigned n)
 {
     if (n >= 256 * 1024 && n < 64u << 20) { /* b372: who holds the heap when a big block is refused */
@@ -235,6 +278,17 @@ static unsigned heap_release(unsigned n)
     }
     struct mallinfo a = mallinfo();
     unsigned free_before = a.fordblks + p4_heap_unclaimed(), big_before = heap_largest();
+    if (heap_reserve && n && n < 64u << 20) { /* b520: the reserve first, on any thread, for any size */
+        __real_free(heap_reserve);
+        heap_reserve = 0;
+        void *p = __real_malloc(n);
+        p4_log("heap reserve released for a request of %u (thread %x): %s\n", n, sceKernelGetThreadId(), p ? "fits" : "still short");
+        p4_log_flush();
+        if (p) {
+            __real_free(p);
+            return heap_reserve_bytes();
+        }
+    }
     extern int p4_arena_active(void);
     unsigned freed = 0;
     void *fits = 0;
@@ -288,11 +342,82 @@ void *__wrap_memalign(size_t a, size_t n)
     return p;
 }
 int p4_arena_owns(const void *p); void p4a_free(void *p); void *p4a_realloc(void *old, unsigned n);
+/* b523 heap guard. b522 and b523 on the PSP crashed in newlib's free (_free_r consolidating backwards) freeing a
+   swizzled texture (rwsky.c unswizzle_raster, under tmxUploadStream): the block's two header words were 0xFFFFFFFF
+   (b522) and 0xFF000000 (b523), texel-like values, so the block in front of it was written past its end. Every free
+   of a heap block now checks the chunk (newlib mallocr.c, dlmalloc 2.6: prev_size, size | PREV_INUSE; in use when the
+   next chunk has PREV_INUSE; a free one in front must have the size prev_size says). A broken one is logged with the
+   chunk in front of it (the writer's block, found by walking the heap) and kept: a leak instead of the crash. */
+extern char *__malloc_sbrk_base;
+extern void *__malloc_av_[];
+void __malloc_lock(struct _reent *); void __malloc_unlock(struct _reent *);
+unsigned p4_heap_guard_hits;
+static int heap_chunk_ok(const unsigned char *mem)
+{
+    const unsigned char *base = (const unsigned char *)__malloc_sbrk_base, *top = (const unsigned char *)__malloc_av_[2];
+    const unsigned char *c = mem - 8;
+    if (!base || base == (const unsigned char *)-1 || !top || c < base || c >= top || ((unsigned)mem & 7))
+        return 0;
+    unsigned hdr = ((const unsigned *)c)[1], size = hdr & ~3u;
+    if (size < 16 || (size & 7) || c + size > top || !(((const unsigned *)(c + size))[1] & 1))
+        return 0; /* the size runs out of the heap, or the next chunk says this one is free */
+    if (!(hdr & 1)) { /* a free chunk in front: free() merges with it */
+        unsigned prev = ((const unsigned *)c)[0];
+        if (prev < 16 || (prev & 7) || prev > (unsigned)(c - base) || (((const unsigned *)(c - prev))[1] & ~3u) != prev)
+            return 0;
+    }
+    return 1;
+}
+/* usable bytes of a heap block from malloc/memalign (0: not a sound chunk start); for rwsky.c tmxDmaCopy */
+unsigned p4_heap_usable(const void *mem)
+{
+    return mem && !p4_arena_owns(mem) && heap_chunk_ok(mem) ? (((const unsigned *)mem)[-1] & ~3u) - 4 : 0;
+}
+static void heap_guard_report(const unsigned char *mem, unsigned ra)
+{
+    const unsigned *h = (const unsigned *)(mem - 8);
+    p4_log("HEAP GUARD %u: free(%x) from %x (p4+%x): chunk header %08x %08x, words in front %08x %08x %08x %08x; kept\n",
+           p4_heap_guard_hits, (unsigned)mem, ra, ra - 0x08804000, h[0], h[1], h[-4], h[-3], h[-2], h[-1]);
+    /* the chunk in front: walk from the heap's base to the last sound chunk below mem */
+    const unsigned char *base = (const unsigned char *)__malloc_sbrk_base, *top = (const unsigned char *)__malloc_av_[2];
+    const unsigned char *c = base, *before = 0;
+    while (((unsigned)(c + 8) & 15))
+        c += 4;
+    unsigned steps = 0;
+    while (c < top && c < mem - 8 && steps++ < 400000) {
+        unsigned size = ((const unsigned *)c)[1] & ~3u;
+        if (size < 16 || (size & 7) || c + size > top + 16)
+            break;
+        before = c, c += size;
+    }
+    if (!before) {
+        p4_log("HEAP GUARD: no chunk below %x (heap %x..%x)\n", (unsigned)mem, (unsigned)base, (unsigned)top);
+        return;
+    }
+    const unsigned *b = (const unsigned *)(before + 8);
+    unsigned bsize = ((const unsigned *)before)[1] & ~3u;
+    p4_log("HEAP GUARD: walk %s at %x; chunk in front %x size %u (ends %x, %d bytes from the broken header), "
+           "site %x, first words %08x %08x %08x %08x, last %08x %08x %08x %08x\n",
+           c == mem - 8 ? "reached the broken chunk" : c < mem - 8 ? "stopped (bad chunk)" : "passed it: not a chunk start",
+           (unsigned)c, (unsigned)(before + 8), bsize, (unsigned)(before + bsize), (int)((mem - 8) - (before + bsize)),
+           ms_site_ra(before + 8), b[0], b[1], b[2], b[3], h[-4], h[-3], h[-2], h[-1]);
+}
 void __wrap_free(void *p)
 {
     if (p4_arena_owns(p)) { /* b376: a cache block (rwsky.c arena.h), whoever frees it */
         p4a_free(p);
         return;
+    }
+    if (p && !heap_chunk_ok(p)) {
+        __malloc_lock(_REENT);
+        int ok = heap_chunk_ok(p); /* again under the lock: another thread may have been mid-free */
+        if (!ok && p4_heap_guard_hits++ < 16)
+            heap_guard_report(p, MS_RA);
+        __malloc_unlock(_REENT);
+        if (!ok) {
+            p4_log_flush();
+            return;
+        }
     }
     ms_remove(p);
     __real_free(p);
@@ -314,7 +439,6 @@ void *__wrap_realloc(void *old, size_t n)
 /* Heap the allocator has not taken from sbrk yet. mallinfo's fordblks counts only the arena already taken: in the b166
    census the battle had 88 KB "free" there with ~5.7 MB of the heap block never touched. libcglue keeps the block's top
    in a local static, so it is found once by asking sbrk (which refuses past the top), under malloc's lock. */
-void __malloc_lock(struct _reent *); void __malloc_unlock(struct _reent *);
 unsigned p4_heap_unclaimed(void)
 {
     static char *top;
@@ -342,17 +466,6 @@ unsigned p4_heap_unclaimed(void)
    (sites from the memstat table: a census build), so the blocks that split the free memory have names
    (psp-addr2line). Logged when a large allocation fails, and on a poke of p4_heapmap (at the next memstat report). */
 int p4_heapmap = 0, p4_heapmap_min = 64 * 1024;
-extern char *__malloc_sbrk_base;
-extern void *__malloc_av_[];
-static unsigned ms_site_ra(const void *p)
-{
-    if (!ms_table)
-        return 0;
-    unsigned i = ms_hash((unsigned)p, 16);
-    while (ms_table[i].p && ms_table[i].p != p)
-        i = (i + 1) & (MS_SLOTS - 1);
-    return ms_table[i].p ? ms_site[ms_table[i].site].ra : 0;
-}
 void p4_heap_map(const char *why)
 {
     __malloc_lock(_REENT);
@@ -431,7 +544,10 @@ void p4_memstat_report(void)
     int intr = pspSdkDisableInterrupts();
     memcpy(ms_copy, ms_site, sizeof ms_copy);
     unsigned live = ms_live, peak = ms_peak, used = ms_used, lost = ms_lost, allocs = ms_allocs;
+    unsigned glive = ms_game_live, gpeak = ms_game_peak, plive = ms_port_live, ppeak = ms_port_peak;
     pspSdkEnableInterrupts(intr);
+    if (p4_game_text_end)
+        p4_log("memstat game live %u KB peak %u KB | port live %u KB peak %u KB\n", glive >> 10, gpeak >> 10, plive >> 10, ppeak >> 10);
     if (p4_heapmap)
         p4_heapmap = 0, p4_heap_map("poke");
     p4_log("memstat live %u KB peak %u KB blocks %u allocs %u lost %u table %u KB\n", live >> 10, peak >> 10, used, allocs, lost,
@@ -577,8 +693,9 @@ static int check_strings(const unsigned *list, int count)
         }
         unsigned p = *(unsigned *)(P4_IMAGE + list[i]);
         const unsigned char *s = (const unsigned char *)p;
-        /* s[-1] may be the top byte of a rebased pointer that sits right before the text */
-        if (p <= P4_IMAGE || p >= end || (s[-1] != 0 && s[-1] != P4_IMAGE >> 24) || s[0] == 0) {
+        /* s[-1] may be the top byte of a rebased pointer that sits right before the text (b517: the image at
+           0x08F5DA00 crosses 0x09000000, so either top byte) */
+        if (p <= P4_IMAGE || p >= end || (s[-1] != 0 && s[-1] != P4_IMAGE >> 24 && s[-1] != (end - 1) >> 24) || s[0] == 0) {
             if (first_bad < 0)
                 first_bad = (int)(0x52DA00 + list[i]);
             bad++;
@@ -607,11 +724,27 @@ static int exit_callback(int a, int b, void *c)
     return 0;
 }
 
+/* b499: sleep needs the volatile block the frame lists hold (rwsky.c p4_lists_volatile) */
+extern volatile int p4_power_switch, p4_power_resumed;
+static int power_callback(int unknown, int flags, void *arg)
+{
+    (void)unknown; (void)arg;
+    if (flags & (PSP_POWER_CB_POWER_SWITCH | PSP_POWER_CB_SUSPENDING | PSP_POWER_CB_STANDBY))
+        p4_power_switch = 1;
+    if (flags & PSP_POWER_CB_RESUME_COMPLETE)
+        p4_power_resumed = 1;
+    return 0;
+}
+
 static int callback_thread(SceSize args, void *argp)
 {
     (void)args; (void)argp;
     int cb = sceKernelCreateCallback("p4_exit", exit_callback, NULL);
     sceKernelRegisterExitCallback(cb);
+    int pcb = sceKernelCreateCallback("p4_power", power_callback, NULL);
+    int pr = scePowerRegisterCallback(-1, pcb);
+    if (pr < 0)
+        p4_log("power callback %08x: sleep stays blocked while the lists hold the volatile block\n", pr);
     sceKernelSleepThreadCB();
     return 0;
 }
@@ -655,6 +788,7 @@ int main(int argc, char **argv)
     { /* b376: the caches' arena, before the game takes its first block */
         extern void p4_arena_init(void);
         p4_arena_init();
+        p4_heap_reserve_tick(); /* b520: the reserve, low in the heap before the game's blocks */
     }
     { /* b495 (issue #21): the crash catcher (crash.c); an empty CRASHTEST file next to the EBOOT then stores to
          address 4, to see p4crash.txt written and the return to the XMB on a device */

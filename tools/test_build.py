@@ -1,5 +1,6 @@
 """Source-build integrity, cache recovery and launch-only installation checks."""
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -68,17 +69,18 @@ class SourceBuildTests(unittest.TestCase):
     def test_cache_rechecks_artifacts_and_rebuilds_corruption(self):
         with self.build_mocks(), patch.object(builder, 'run_stage', side_effect=self.fake_stage) as stage:
             release = self.invoke()
-            self.assertEqual(stage.call_count, 7)
+            self.assertEqual(stage.call_count, 9)
             calls = {call.args[1]: call.args[2] for call in stage.call_args_list}
             self.assertIn('--static', calls['psp_strips.py'])
             self.assertEqual(calls['psp_clut.py'], ['--iso', self.iso.resolve()])
             self.assertEqual(calls['psp_static_pack.py'], ['--iso', self.iso.resolve()])
+            self.assertEqual(calls['psp_icons.py'], ['--iso', self.iso.resolve()])
             self.assertIn('--asset-packs', calls['psp_hw_debug.py'])
             self.assertEqual(self.invoke(), release)
-            self.assertEqual(stage.call_count, 7)
+            self.assertEqual(stage.call_count, 9)
             (release / 'p4data.bin').write_bytes(b'corruption')
             self.invoke()
-            self.assertEqual(stage.call_count, 14)
+            self.assertEqual(stage.call_count, 18)
             self.assertEqual((release / 'p4data.bin').read_bytes(), b'data')
 
     def test_optional_strip_pack_is_checked_and_unknown_artifacts_are_rejected(self):
@@ -165,7 +167,7 @@ class SourceBuildTests(unittest.TestCase):
     def test_build_only_installs_consistent_files_without_media_or_complete_marker(self):
         release = self.folder / 'release'; release_fixture(release)
         manifest = builder.validate_result(release, 164)
-        for name in ('p4strips.bin', 'p4clut.bin', 'p4static.bin'):
+        for name in ('p4strips.bin', 'p4clut.bin', 'p4static.bin', 'p4sprite.bin'):
             (release / name).write_bytes(name.encode())
             manifest['artifact_sha256'][name] = builder.digest(release / name)
         builder.save_json(release / 'manifest.json', manifest)
@@ -175,7 +177,7 @@ class SourceBuildTests(unittest.TestCase):
             result = prepare(self.iso, self.folder / 'output', self.bundle, build_only=True)
             catalogue.assert_not_called(); movies.assert_not_called()
             self.assertEqual((result / 'EBOOT.PBP').read_bytes(), (release / 'EBOOT.PBP').read_bytes())
-            for name in ('p4strips.bin', 'p4clut.bin', 'p4static.bin'):
+            for name in ('p4strips.bin', 'p4clut.bin', 'p4static.bin', 'p4sprite.bin'):
                 self.assertEqual((result / name).read_bytes(), (release / name).read_bytes())
             self.assertTrue((result / 'build_manifest.json').exists())
             self.assertFalse((result / 'installation.json').exists())
@@ -186,6 +188,27 @@ class SourceBuildTests(unittest.TestCase):
             prepare(self.iso, self.folder / 'output', self.bundle, build_only=True)
             self.assertEqual(marker.read_text(), 'existing complete installation marker')
 
+    def test_player_pictures_go_into_the_installed_eboot_only(self):
+        from PIL import Image
+        release = self.folder / 'release'; release_fixture(release)
+        picture = self.folder / 'my icon.jpg'; Image.new('RGB', (288, 160), (10, 20, 30)).save(picture)
+        output = self.folder / 'output'
+        with patch('psp_prepare.inspect_disc', return_value=([], None, None)), \
+             patch.object(builder, 'build_eboot', return_value=release):
+            result = prepare(self.iso, output, self.bundle, build_only=True, icon0=picture)
+            eboot = (result / 'EBOOT.PBP').read_bytes()
+            offsets = list(struct.unpack_from('<8I', eboot, 8)) + [len(eboot)]
+            self.assertEqual(Image.open(io.BytesIO(eboot[offsets[1]:offsets[2]])).size, (144, 80))
+            self.assertEqual(eboot[offsets[6]:offsets[7]], b'locally generated PRX')
+            self.assertEqual((release / 'EBOOT.PBP').read_bytes()[:8], eboot[:8])  # the cached build is untouched
+            self.assertNotEqual((release / 'EBOOT.PBP').read_bytes(), eboot)
+            manifest = json.loads((result / 'build_manifest.json').read_text())
+            self.assertEqual(manifest['files']['EBOOT.PBP'], builder.digest(result / 'EBOOT.PBP'))
+            prepare(self.iso, output, self.bundle, build_only=True)  # no pictures now: same folder, the built EBOOT
+            self.assertEqual((result / 'EBOOT.PBP').read_bytes(), (release / 'EBOOT.PBP').read_bytes())
+            with self.assertRaises(ValueError):
+                prepare(self.iso, output, self.bundle, build_only=True, pic1=self.iso)  # not a picture
+
     def test_source_payload_contains_no_game_binaries_or_recipe(self):
         root = Path(__file__).resolve().parent.parent
         config = source_package(root, self.bundle)
@@ -194,8 +217,7 @@ class SourceBuildTests(unittest.TestCase):
         self.assertNotIn('eboot_sha256', config)
         self.assertFalse((self.bundle / 'P4').exists())
         source = self.bundle / 'source'
-        self.assertTrue(all(path.suffix in ('.c', '.h', '.S', '.py') or
-                            (path.parent == source / 'port/icons' and path.name in ('ICON0.PNG', 'PIC1.PNG'))
+        self.assertTrue(all(path.suffix in ('.c', '.h', '.S', '.py')  # no artwork: psp_icons.py makes it from the ISO
                             for path in source.rglob('*') if path.is_file()))
         builder.verify_payload(self.bundle, config)
 

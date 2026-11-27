@@ -17,7 +17,9 @@ MARKED = re.compile(r"//\s*FUN_([0-9A-Fa-f]{8})\s*\n(?:\s*(?:/\*.*?\*/|//[^\n]*|
 # reports ".p4image overlaps .bss", raise it by a multiple of 0x10000 (the heap after the image shrinks by as much),
 # then rebuild from psp_census --compile, since RETAIL_LITERAL embeds K.
 # b305: 0x0900DA00 -> 0x0902DA00 (+128 KB), the .bss had grown 6.3 KB past the image.
-PSP_IMAGE = 0x0902DA00
+# b517: 0x0902DA00 -> 0x08F5DA00 (-832 KB, the heap grows by as much): 697 KB of .bss moved into the image's blanked
+# VU microcode (port/vu_place.h); the hwdbg .bss then ended 951 KB below the image, ~97 KB is left for growth.
+PSP_IMAGE = 0x08F5DA00
 START = 0x52DA00
 K = PSP_IMAGE - START
 
@@ -95,8 +97,12 @@ def native_functions(elf=None, load_base=0):
 def build(broken=0, elf=None, load_base=0):
     image, _, _ = load()
     data = bytearray(image[START - BASE:END_DATA - BASE])
-    for a, b in vu_regions(image):
+    vu = vu_regions(image)
+    for a, b in vu:
         data[a - START:b - START] = bytes(b - a)
+    # b517: port/vu_place.h keeps port buffers in this blanked VU run; it must stay inside one
+    place = {k: int(v, 0) for k, v in re.findall(r"\b(VU_BASE|VU_END) = (0x[0-9a-fA-F]+)", (ROOT / "port" / "vu_place.h").read_text())}
+    assert any(a <= place["VU_BASE"] and place["VU_END"] <= b for a, b in vu), f"vu_place.h range is not VU microcode: {place}"
     strings = []
     native = native_functions(elf, load_base) if elf is not None else native_functions()
     unlinked = 0

@@ -5,6 +5,63 @@ Differences between the PSP port and the PS2 original that the user has seen on 
 
 ## Open
 
+### A dark-brown triangle next to the hero in Dojima's living room (found 2026-11-25, b497)
+
+- **Where:** 4/17 Early Morning, Dojima's living room, "It seems that only Nanako is here." (event E163_001). A dark
+  brown wedge stands right of the hero: apex at his hip (about 359,88 on the 480x272 screen), base down to the floor
+  behind the message window. Also in PPSSPP (user's save state `state_tri.ppst`), so not hardware-specific.
+- **What it is (PSP GE dumps ge_0036/38, `tools/ge_dump_tris.py`, `tools/ge_dump_render.py`):** draw 21 (ge_0036) /
+  20 (ge_0038), room furniture from the atlas with the dark cupboard and the microwave (CLUT8 256x256, alpha test
+  >= 0xFE). The object stands at the camera: the near plane is at w = 100 (projection 1.029 / -202.9) and its
+  vertices have w 42-128, so its triangles cross the near plane. The GE clips them there and draws the part
+  beyond it: the wedge.
+- **Ruled out:** `p4_guard_clip` 0 (no change: with gnear the CPU never cuts the near plane), `p4_world_direct` 0 (no
+  change: the game itself submits the object).
+- **PS2:** the user's PCSX2 state of the same moment (`ss_tri.p2s`, its Screenshot.png kept as
+  `build/ps2_ref/dojima_0417_morning.png`) shows nothing right of the hero: the PS2 drops these triangles.
+- **b500 candidate, withdrawn in b504:** `p4_guard_near_drop` 1 dropped near-crossing triangles whole. The wedge went,
+  but walking up to the wall by the curtain (4/16 evening) made that wall see-through (screenshots wall1/wall2 in
+  the b503 PSPLink capture folder). So the PS2 does not simply drop near-crossing triangles. `p4_static_list` 0 does not
+  remove the wedge either (b503, x0-x2): the game itself submits the cupboard.
+- **PCSX2 GS dump of the same moment** (`snaps/...20261125212732.gs.zst`; `tools/gs_frame.py FILE 2`, frame 1 is
+  empty in this dump format): 117 draw groups, nothing with the cupboard's huge near-camera extent in the wedge's
+  place (PS2 coords about 448-527, 145-323). Still open: what makes the PS2 skip it (its near clip, or the camera).
+- **Measured since (2026-11-25):** the PS2 camera in the state has near 100, far 6999.9985 (eeMemory), and a fit of
+  953 vertices seen in both dumps gives PS2 z = -942.5 + 6648925 / w: z = 65535 at w = 100.0, the same near plane.
+  The PS2 clips at the near plane (wall dump `snaps/...213950`: vertices at z 0xFFF8 and at the -5/453 clip edges),
+  so it does not drop near-crossing triangles. The cupboard's wedge triangles face away from the camera (screen
+  winding opposite to the room's walls); the PS2 frames hold 97% front-facing triangles (4168 vs 129) where we draw
+  5995 vs 4595. `p4_cull_back` 1 (all RenderWare cull-back meshes, CCW front) on b505: the window lost its white
+  glare as on the PS2, but walls and curtains lost every other triangle (sawtooth holes) and the wedge stayed; 2 (CW)
+  breaks the room. Back to 3. (A later per-triangle match showed the PS2 draws back faces too: not a culling issue.)
+- **b507-b509:** every PSP draw has its PS2 counterpart; only near-crossing triangles differ. A 4:3 PCSX2 dump
+  (no widescreen patch) shows the PS2's near-clipped cupboard pieces as zero-area triangles, while walls are clipped
+  normally. `p4_guard_near_drop` 2 (drop a triangle with two corners in front of the near plane) removes exactly the
+  wedge and keeps the curtain wall, but cuts holes in the floor while walking. Back to 0 (b510). Next: read the PS2
+  VU1 clipping microcode (vu1MicroMem.bin in the PCSX2 state) and do what it does. Any drop is view-dependent and
+  must be kept out of static lists (b500's drop recorded during the room load is what hid the curtain).
+
+### The living-room curtain is missing after the room loads (found 2026-11-25, b500-b502)
+
+- **Where:** Dojima's living room, 4/17 morning: the dark-blue curtain between the window and the wall (PS2
+  screenshot, `build/ps2_ref/dojima_0417_morning.png`) is not drawn; the plaster panel behind it shows.
+- **Measured (b502, GE dumps ge_0040/41 with their new .bmp):** in the bad frame the curtain draw (vtype 0x133,
+  s16 positions: a prepared static mesh, CLUT8 256x256 curtain texture) is absent, not drawn with a wrong texture.
+  After a cache release (`load_release_pending` = 1 poked) the curtain is drawn and stays (three screenshots over 35 s).
+  It is not `p4_guard_near_drop` (present and absent with it both on and off) and not the volatile lists (b502).
+- **Cause (b509):** b500's near drop removed the curtain's triangles while the camera passed close during the room
+  load, and the static list kept that. Without the drop (b504+) the curtain is there with no extra cache release.
+- **Was:** a cache filled while the room was loading keeps a state without the curtain. Next: reload the room, confirm it is missing, then poke one cache off at a time
+  (`p4_world_direct`, static lists, `p4_guard_result`) before releasing.
+
+### The picture is brighter than the PS2's, details wash out (reported 2026-11-25 by the user and by testers)
+
+- **Where:** everywhere; in Dojima's living room the windows are white on the PSP while the PS2 (same moment,
+  `build/ps2_ref/dojima_0417_morning.png`) shows the yard, wall and plants through them.
+- **Not yet known:** a phone photo of an LCD is no evidence of levels. Next: a PSP framebuffer screenshot (b499+
+  `psp_probe_ab.py --shot`) of the same moment, compared with the PS2 screenshot channel by channel; then the usual
+  suspects: vertex colour scaling (PS2 0x80 = 1.0), `p4_alpha_x2`, prelit/unprelit lighting, the full-screen passes.
+
 ### Junes floor reflection missing, and its render pass paid for nothing (found 2026-11-16, b326-b327)
 
 - **Where:** Junes, West Entrance (field 9 room 4; scenes.txt preset "Junes West Entrance"). The user saw low FPS

@@ -15,8 +15,13 @@ enum { AB_FREE = 1, AB_PREV_FREE = 2 };
 typedef struct ArenaBlock { unsigned prev_size, size; struct ArenaBlock *next, *prev; } ArenaBlock;
 /* read once at boot (p4_arena_init); 0: no arena, the caches stay on the heap as before b376. b378: 0 by default.
    b376 on the PSP, field 20 room 1: 12 MB was full (10.8 MB used, largest free 4 KB, 7400 refusals a window), the
-   static lists re-recorded every frame and the frame took 106 ms. Needs per-cache budgets that fit the arena first. */
-int p4_arena_kb = 0;
+   static lists re-recorded every frame and the frame took 106 ms. Needs per-cache budgets that fit the arena first.
+   b518: 9 MB, on. Measured with a 14 MB arena (PPSSPP, memstat): the caches peak at 7.1 MB (field 20 room 1; Margaret
+   6.7, Heaven 6.1, f023_003 6.1, battles 5.3-4.6), no refusal; the heap side (game 12.6 MB at a field change,
+   textures, audio, the renderer's fixed buffers) at 20.3 MB. Issue #23: the caches between the game's blocks left 14
+   MB free and no 2 MB run; in the arena the game's heap holds only the game's kind of blocks, as on the PS2.
+   b522: 8 MB. b521's call ring and b522's mesh scratch took ~1 MB off the caches; that MB goes to the game's heap. */
+int p4_arena_kb = 8192;
 static unsigned char *arena_base, *arena_end;
 static unsigned arena_fl_bits, arena_sl_bits[ARENA_FL];
 static ArenaBlock *arena_free[ARENA_FL][ARENA_SL];
@@ -135,9 +140,29 @@ static int arena_owns(const void *p) { return arena_ready && (const unsigned cha
 int p4_arena_owns(const void *p) { return arena_owns(p); }
 int p4_arena_active(void) { return arena_ready; }
 
-void *p4a_memalign(unsigned align, unsigned n)
+/* b521: who holds the arena, with p4_memstat on (main.c): live and peak bytes per caller, the site index kept in the
+   used block's free-list link (unused while the block is taken). Reported with arena_report, named by psp-addr2line. */
+enum { ARENA_SITES = 256 };
+static struct { unsigned ra, live, peak; } arena_site[ARENA_SITES];
+static void arena_site_add(ArenaBlock *b, unsigned ra)
 {
-    extern void *__wrap_malloc(size_t);
+    extern int p4_memstat;
+    unsigned s = (ra >> 2) * 2654435761u >> 24, k = 0;
+    while (k < ARENA_SITES && arena_site[s].ra && arena_site[s].ra != ra)
+        s = (s + 1) & (ARENA_SITES - 1), k++;
+    if (!p4_memstat || k == ARENA_SITES) {
+        b->next = 0;
+        return;
+    }
+    arena_site[s].ra = ra;
+    if ((arena_site[s].live += ab_size(b)) > arena_site[s].peak)
+        arena_site[s].peak = arena_site[s].live;
+    b->next = (ArenaBlock *)(s + 1);
+}
+static void *arena_alloc(unsigned align, unsigned n, unsigned ra);
+void *p4a_memalign(unsigned align, unsigned n) { return arena_alloc(align, n, (unsigned)__builtin_return_address(0)); }
+static void *arena_alloc(unsigned align, unsigned n, unsigned ra)
+{
     if (!arena_ready)
         return align <= 16 ? malloc(n) : memalign(align, n);
     if (align < 16)
@@ -168,17 +193,18 @@ void *p4a_memalign(unsigned align, unsigned n)
     }
     arena_split(b, size);
     arena_take(b);
+    arena_site_add(b, ra);
     arena_used += ab_size(b), arena_allocs++;
     if (arena_used > arena_peak)
         arena_peak = arena_used;
     pspSdkEnableInterrupts(intr);
     return (unsigned char *)b + 16;
 }
-void *p4a_malloc(unsigned n) { return p4a_memalign(16, n); }
+void *p4a_malloc(unsigned n) { return arena_alloc(16, n, (unsigned)__builtin_return_address(0)); }
 void *p4a_calloc(unsigned a, unsigned b)
 {
     unsigned n = a * b;
-    void *p = p4a_memalign(16, n);
+    void *p = arena_alloc(16, n, (unsigned)__builtin_return_address(0));
     if (p)
         memset(p, 0, n);
     return p;
@@ -195,6 +221,8 @@ void p4a_free(void *p)
     int intr = pspSdkDisableInterrupts();
     ArenaBlock *b = (ArenaBlock *)((unsigned char *)p - 16);
     arena_used -= ab_size(b);
+    if ((unsigned)b->next - 1 < ARENA_SITES) /* b521 */
+        arena_site[(unsigned)b->next - 1].live -= ab_size(b);
     if (b->size & AB_PREV_FREE) { /* merge with the free block before */
         ArenaBlock *before = (ArenaBlock *)((unsigned char *)b - b->prev_size);
         arena_remove(before);
@@ -219,7 +247,7 @@ void *p4a_realloc(void *old, unsigned n)
         p4a_free(old);
         return 0;
     }
-    void *p = p4a_malloc(n);
+    void *p = arena_alloc(16, n, (unsigned)__builtin_return_address(0));
     if (p && old) {
         unsigned have = ab_size((ArenaBlock *)((unsigned char *)old - 16)) - 16;
         memcpy(p, old, have < n ? have : n);
@@ -248,4 +276,22 @@ static void arena_report(void)
            arena_used >> 10, arena_peak >> 10, arena_largest() >> 10, arena_allocs, arena_fails);
     arena_allocs = arena_fails = 0;
     arena_peak = arena_used;
+    extern int p4_memstat;
+    if (!p4_memstat)
+        return;
+    unsigned shown[16] = { 0 };
+    for (int k = 0; k < 16; k++) { /* b521: the 16 callers holding the most */
+        int best = -1;
+        for (int i = 0; i < ARENA_SITES; i++) {
+            int seen = 0;
+            for (int j = 0; j < k; j++)
+                seen |= shown[j] == (unsigned)i + 1;
+            if (!seen && arena_site[i].ra && (best < 0 || arena_site[i].live > arena_site[best].live))
+                best = i;
+        }
+        if (best < 0 || !arena_site[best].live)
+            break;
+        shown[k] = best + 1;
+        p4_log("arena site %6u KB peak %6u KB from %07x\n", arena_site[best].live >> 10, arena_site[best].peak >> 10, arena_site[best].ra - 8);
+    }
 }

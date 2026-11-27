@@ -757,6 +757,22 @@ static void draw_guarded_chunks(int prim, const unsigned short *idx, int nidx, c
             guard_dropped++;
             continue;
         }
+        if (p4_guard_near_drop && ((ca | cb | cc) & 1)) { /* b500: crosses the near plane */
+            /* b506: dropped whole only when a corner is closer than p4_guard_near_ratio % of the near plane; the rest
+               is cut there as before. Histogram of the nearest corner, in tenths of the near plane. */
+            float wa = guard_clip[a][3], wb = guard_clip[b][3], wc = guard_clip[c][3];
+            float wmin = wa < wb ? (wa < wc ? wa : wc) : (wb < wc ? wb : wc);
+            int bucket = wmin <= 0 ? 0 : (int)(wmin * 10 / near) + 1;
+            guard_near_hist[bucket > 11 ? 11 : bucket]++;
+            int in_front = (ca & 1) + (cb & 1) + (cc & 1);
+            /* b508 mode 2: dropped when two corners are in front of the near plane (clipping would leave a small
+               triangle, not a quad). PCSX2 GS dumps of the 4/17 living room: the PS2's near-clipped cupboard pieces
+               come out zero-area; the wall it keeps has corners behind the eye. */
+            if (p4_guard_near_drop == 2 ? in_front >= 2 : wmin < near * p4_guard_near_ratio * 0.01f) {
+                guard_near_dropped++;
+                continue;
+            }
+        }
         { /* wholly beyond one edge of the screen (x or y past +-w): invisible, nothing to cut (PS2RC drops these too) */
             const float *pa = guard_clip[a], *pb = guard_clip[b], *pc = guard_clip[c];
             if ((pa[0] > pa[3] && pb[0] > pb[3] && pc[0] > pc[3]) || (pa[0] < -pa[3] && pb[0] < -pb[3] && pc[0] < -pc[3]) ||
@@ -1033,7 +1049,7 @@ static void guard_boxes_classify(const float *box, int n, const float m[4][4], f
        (fix from MeMeNT0xMoRii's fork: the all-out attack portraits). */
     float camera_near = *(const float *)((const char *)current_camera + CAMERA_NEAR);
     sp[0][3] -= p4_guard_gnear ? camera_near : near;
-    int first_band = p4_guard_gnear ? 1 : 0;
+    int first_band = p4_guard_gnear && !p4_guard_near_drop ? 1 : 0; /* b500: near-crossing chunks per triangle */
     *partial = *culled = 0;
     if (p4_guard_box_vfpu) {
         guard_boxes_vfpu(box, n, bp, sp, first_band, cls, partial, culled);

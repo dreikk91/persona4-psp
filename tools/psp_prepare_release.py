@@ -158,13 +158,15 @@ def main():
                 '--hidden-import', 'tkinter', '--hidden-import', 'tkinter.filedialog', '--hidden-import', 'tkinter.messagebox',
                 '--hidden-import', 'tkinter.ttk',
                 '--hidden-import', 'runpy', '--hidden-import', 'concurrent.futures.thread',
+                '--hidden-import', 'psp_icons',  # b525: the player's XMB pictures, imported inside psp_prepare's functions
+                '--hidden-import', 'psp_update',  # imported inside gui()
                 str(ROOT / 'tools/psp_prepare.py')], check=True)
             print(f'Longest freeze path: {check_path_lengths(temp, 0)} characters', flush=True)
             shutil.copytree(temp / 'dist/Prepare P4', out, dirs_exist_ok=True)
     else:
         # Developer package: public packages should use --freeze.
         for name in ('psp_prepare.py', 'psp_audio.py', 'psp_video.py', 'psp_disc.py', 'psp_data_census.py',
-                     'psp_build.py', 'extract_elf.py', 'psp_meshopt.py'):
+                     'psp_build.py', 'extract_elf.py', 'psp_meshopt.py', 'psp_icons.py', 'psp_update.py'):
             target = out / 'tools' / name
             target.parent.mkdir(exist_ok=True); shutil.copyfile(ROOT / 'tools' / name, target)
     if args.legacy_prebuilt:

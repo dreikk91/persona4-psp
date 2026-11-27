@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from psp_data_census import ROOT, load
-from psp_link import PORT, PORT_ASM, LIB_FLAGS, pbp_icons, run, check_import_ranges, correct_retail_data_symbols, crash_prx_object
+from psp_link import skin_code_hash, PORT, PORT_ASM, LIB_FLAGS, pbp_icons, run, check_import_ranges, correct_retail_data_symbols, crash_prx_object
 from psp_make_data import K, PSP_IMAGE, build
 from psp_xref import find_gp
 
@@ -28,7 +28,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=ROOT / "build" / "psplink_diag")
     parser.add_argument("--release", action="store_true", help="Build an XMB release without hardware profiling")
-    parser.add_argument("--asset-packs", type=Path, help="Directory containing p4strips.bin, p4clut.bin and optional p4static.bin")
+    parser.add_argument("--asset-packs", type=Path, help="Directory containing p4strips.bin, p4clut.bin and optional p4static.bin, p4sprite.bin")
     args = parser.parse_args()
     if args.asset_packs and not all((args.asset_packs / name).is_file() for name in ("p4strips.bin", "p4clut.bin")):
         parser.error("--asset-packs requires both p4strips.bin and p4clut.bin")
@@ -50,7 +50,7 @@ def main():
     print(f"Staged {len(inputs)} inputs; compiling diagnostic entry and renderer", flush=True)
     gp = find_gp(load()[0]) + K
     flags = [os.environ.get("P4_PORT_OPT", "-O2"), "-g", "-G0", "-D_PSP_FW_VERSION=600",  # P4_PORT_OPT=-Os: b241 instruction-cache experiment
-             f"-DP4_GP={gp:#x}u", f"-DP4_K={K:#x}u", f"-DP4_IMAGE={PSP_IMAGE:#x}u",
+             f"-DP4_GP={gp:#x}u", f"-DP4_K={K:#x}u", f"-DP4_IMAGE={PSP_IMAGE:#x}u", f"-DP4_SKIN_CODE={skin_code_hash():#x}u",
              f"-I{sdk / 'include'}", f"-I{ROOT / 'port'}"]
     if not args.release:
         flags.append("-DP4_HW_PROFILE=1")
@@ -101,11 +101,16 @@ def main():
             "Enable", "Disable", "StencilFunc", "StencilOp", "AlphaFunc", "DepthMask", "DepthFunc", "PixelMask",
             "FrontFace", "BlendFunc", "TexFunc", "TexFilter", "TexWrap", "TexMode", "TexImage", "TexFlush", "TexSync",
             "SetMatrix", "Scissor")]
+    marks = []  # b518: empty labels around the game's objects, for main.c's memstat game/port split
+    for mark in ("p4_game_text_begin", "p4_game_text_end"):
+        (out / f"{mark}.S").write_text(f".text\n.globl {mark}\n{mark}:\n", encoding="utf-8")
+        run(binpath / "psp-gcc.exe", "-c", out / f"{mark}.S", "-o", out / f"{mark}.o")
+        marks.append(out / f"{mark}.o")
     run(binpath / "psp-gcc.exe", "-G0", f"-L{sdk / 'lib'}", "-Wl,-zmax-page-size=128",
         f"-specs={sdk / 'lib' / 'prxspecs'}", f"-Wl,-q,-T{(stage / 'linkfile.prx').as_posix()}",
         "-Wl,--allow-multiple-definition", *[f"-Wl,--wrap={name}" for name in wraps],
-        *port, sdk / "lib" / "prxexports.o",
-        stage / "stubs.o", stage / "reasm.o", f"@{rsp.as_posix()}", stage / "symbols.ld", *LIB_FLAGS, "-o", elf)
+        *port, sdk / "lib" / "prxexports.o", marks[0],
+        stage / "stubs.o", stage / "reasm.o", f"@{rsp.as_posix()}", marks[1], stage / "symbols.ld", *LIB_FLAGS, "-o", elf)
     run(binpath / "psp-fixup-imports.exe", elf)
     print(f"Validated {check_import_ranges(elf)} PSP import libraries", flush=True)
     nm = run(binpath / "psp-nm.exe", elf)
@@ -126,7 +131,7 @@ def main():
     artifacts = ["p4.elf", "p4.prx", "EBOOT.PBP", data_name, "p4str.bin"]
     packs = [args.asset_packs / name for name in ("p4strips.bin", "p4clut.bin")] if args.asset_packs else [ROOT / "build/psp_dist/PSP/GAME/P4/p4strips.bin"]
     asset_root = args.asset_packs or ROOT / "build/psp_dist/PSP/GAME/P4"
-    packs.append(asset_root / "p4static.bin")
+    packs += [asset_root / "p4static.bin", asset_root / "p4sprite.bin"]
     for pack in packs:
         if pack.is_file():
             shutil.copyfile(pack, out / pack.name)

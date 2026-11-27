@@ -6,7 +6,14 @@
 #include "paths.h"
 extern void p4_log(const char *fmt,...);
 static short current_cue=-1,current_track=-1;
+#include "vu_place.h"
+#ifdef P4_K /* b517: in the image's VU block (vu_place.h) */
+typedef char VuPartitions[256][192];
+_Static_assert(sizeof(VuPartitions) <= VU_PARTITIONS_SIZE, "vu_place.h: partitions grew");
+#define partitions VU_PLACE(VuPartitions, VU_PARTITIONS)
+#else
 static char partitions[256][192];
+#endif
 static unsigned slot_complete[6];
 
 static const char *table_name(unsigned address,unsigned index)

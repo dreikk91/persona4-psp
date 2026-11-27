@@ -3,7 +3,7 @@
 
   python tools/psp_link.py   # after psp_census.py --compile; writes build/psp/ and build/psp_dist/
 """
-import os, re, struct, subprocess, sys
+import hashlib, os, re, struct, subprocess, sys
 from pathlib import Path
 from psp_data_census import CODE, END, ROOT, inside
 from psp_link_census import OBJ, symbols
@@ -29,12 +29,26 @@ PORT_ASM = ("kubridge", "video_nal")
 LIB_FLAGS = ["-lpspmpeg", "-lpspdmac", "-lpspsascore", "-lpspgum", "-lpspgu", "-lpspdebug", "-lpspdisplay", "-lpspge", "-lpspctrl", "-lpsppower", "-lpspaudio", "-Wl,-u,sceUtilityGetSystemParamInt", "-lpsputility", "-lm"]
 
 
+def skin_code_hash(port=ROOT / "port"):
+    """b515: the code a cached skin entry comes from (port/skin_disk.h keys its files with it): skin.h, skin_disk.h
+    and the mesh.h helpers the build calls. Line endings normalised, so a checkout's CRLF does not change it."""
+    h = hashlib.sha256()
+    for name in ("skin.h", "skin_disk.h"):
+        h.update((port / name).read_bytes().replace(b"\r\n", b"\n"))
+    mesh = (port / "mesh.h").read_bytes().replace(b"\r\n", b"\n").decode("latin-1")
+    for function in ("double_colour", "normal_s8"):
+        found = re.search(rf"^static inline [^\n]*\b{function}\(.*?^}}\n", mesh, re.S | re.M)
+        assert found, f"mesh.h: {function} not found for the skin code hash"
+        h.update(found.group(0).encode("latin-1"))
+    return int.from_bytes(h.digest()[:4], "little") or 1  # 0 means "no hash" in skin_disk.h
+
 def crash_prx_object(bin_dir, sdk, out):
     """b495: the crash catcher's kernel half (port/p4crash_prx.c) as its own kernel PRX, returned as an object that
     holds its bytes (p4crash_prx[], p4crash_prx_size) for port/crash.c, which writes it next to the EBOOT at boot."""
     out = Path(out)
     flags = ["-O2", "-G0", "-Wall", "-fno-builtin", "-D_PSP_FW_VERSION=600", f"-I{Path(sdk) / 'include'}"]
     run(Path(bin_dir) / "psp-gcc.exe", *flags, "-c", ROOT / "port" / "p4crash_prx.c", "-o", out / "p4crash_prx.o")
+    run(Path(bin_dir) / "psp-gcc.exe", *flags, "-c", ROOT / "port" / "p4crash_import.S", "-o", out / "p4crash_import.o")  # b523
     # pspsdk's default exports have no module_stop: a stop would not run it (psp-developer debug-tools.md)
     (out / "p4crash.exp").write_text("PSP_BEGIN_EXPORTS\nPSP_EXPORT_START(syslib, 0, 0x8000)\nPSP_EXPORT_FUNC_HASH(module_start)\n"
                                      "PSP_EXPORT_FUNC_HASH(module_stop)\nPSP_EXPORT_VAR_HASH(module_info)\nPSP_EXPORT_END\n"
@@ -43,7 +57,7 @@ def crash_prx_object(bin_dir, sdk, out):
     run(Path(bin_dir) / "psp-gcc.exe", *flags, "-c", out / "p4crash_exports.c", "-o", out / "p4crash_exports.o")
     elf = out / "p4crash.elf"
     run(Path(bin_dir) / "psp-gcc.exe", "-G0", "-nostartfiles", f"-L{Path(sdk) / 'lib'}", f"-specs={Path(sdk) / 'lib' / 'prxspecs'}",
-        f"-Wl,-q,-T{(Path(sdk) / 'lib' / 'linkfile.prx').as_posix()}", out / "p4crash_prx.o", out / "p4crash_exports.o",
+        f"-Wl,-q,-T{(Path(sdk) / 'lib' / 'linkfile.prx').as_posix()}", out / "p4crash_prx.o", out / "p4crash_import.o", out / "p4crash_exports.o",
         "-lpspkernel", "-o", elf)
     run(Path(bin_dir) / "psp-fixup-imports.exe", elf)
     run(Path(bin_dir) / "psp-prxgen.exe", elf, out / "p4crash.prx")
@@ -80,9 +94,9 @@ def check_import_ranges(elf):
 
 
 def pbp_icons():
-    """pack-pbp's four image slots ICON0, ICON1, PIC0, PIC1: ICON0 (144x80) and PIC1 (480x272) from port/icons, shipped
-    in the source package, NULL when absent; ICON1 (an animated PMF) and PIC0 stay empty. b495: PIC1 used to land in
-    the ICON1 slot."""
+    """pack-pbp's four image slots ICON0, ICON1, PIC0, PIC1: ICON0 (144x80) and PIC1 (480x272) from port/icons, which
+    tools/psp_icons.py makes from the player's ISO (no artwork in the repository or the package), NULL when absent;
+    ICON1 (an animated PMF) and PIC0 stay empty. b495: PIC1 used to land in the ICON1 slot."""
     icon0, pic1 = (path if path.is_file() else "NULL" for path in (ROOT / "port/icons/ICON0.PNG", ROOT / "port/icons/PIC1.PNG"))
     return [icon0, "NULL", "NULL", pic1]
 
@@ -155,7 +169,7 @@ def main():
     objects = [p for p in sorted(OBJ.glob("*.o")) if not p.name.startswith((NO_SOUND, *RETAIL_WORLD))]
     results = [symbols(p) for p in objects]
     defined = {n for _, d, _ in results for _, n in d}
-    flags = ["-O2", "-G0", "-D_PSP_FW_VERSION=600", f"-DP4_GP={gp + K:#x}u", f"-DP4_K={K:#x}u", f"-DP4_IMAGE={PSP_IMAGE:#x}u", f"-I{SDK / 'include'}", f"-I{ROOT / 'port'}"]
+    flags = ["-O2", "-G0", "-D_PSP_FW_VERSION=600", f"-DP4_GP={gp + K:#x}u", f"-DP4_K={K:#x}u", f"-DP4_IMAGE={PSP_IMAGE:#x}u", f"-DP4_SKIN_CODE={skin_code_hash():#x}u", f"-I{SDK / 'include'}", f"-I{ROOT / 'port'}"]
     OUT.mkdir(parents=True, exist_ok=True)
     port_objects = []
     for source in PORT:

@@ -159,8 +159,10 @@ unsigned func_004c9670(Handle *h) { return h->size; }
 unsigned func_004c95f8(Handle *h) { return (h->size + SECTOR - 1) / SECTOR; }
 
 /* ADXF_ReadNw32: whole sectors, synchronous. ponytail: blocks the frame, a loader thread when load times show. */
+unsigned p4_io_us, p4_io_bytes; /* b513: read time (lock wait included) and bytes, for rwsky.c hitch_check */
 int func_004c9010(Handle *h, int sectors, void *buffer)
 {
+    unsigned io_t0 = sceKernelGetSystemTimeLow();
     static SceUID lock;
     if (lock <= 0)
         lock = sceKernelCreateSema("p4io", 0, 1, 1, 0);
@@ -198,6 +200,7 @@ int func_004c9010(Handle *h, int sectors, void *buffer)
         offset += n;
     }
     sceKernelSignalSema(lock, 1);
+    p4_io_us += sceKernelGetSystemTimeLow() - io_t0, p4_io_bytes += got;
     /* A short read rounded up to whole sectors let the archive loader parse a tail never read
        (fix from MeMeNT0xMoRii's fork): report it as an error instead. */
     if (left != 0) {

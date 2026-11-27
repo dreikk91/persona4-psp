@@ -2,6 +2,8 @@
    address replaces that address for C and reassembled code alike. */
 #include <pspkernel.h>
 #include <pspdisplay.h>
+#include <psppower.h>
+#include <pspsuspend.h>
 #include <pspgu.h>
 #include <pspge.h>
 #include <pspgum.h>
@@ -91,6 +93,64 @@ static unsigned (*list_store)[LIST_WORDS];
 static unsigned *list;
 static unsigned list_refused_draws;
 static void *draw_buffer;
+/* b499 p4_lists_volatile: the two frame lists (1 MB) live in the volatile block (0x08400000, 4 MB), which was idle
+   outside movies; the heap keeps that 1 MB. The block goes back before every movie (video.c locks it for the decoder;
+   p4_lists_park / p4_lists_unpark around the movie, the GE idle) and before sleep: the system uses the block then,
+   so it is held with scePowerLock, and a power-switch callback (main.c) makes the drawing thread drain the GE, give
+   the block and the lock back, wait for the resume and take both again. 0: lists on the heap as before. */
+int p4_lists_volatile = 0; /* b502: off. b500 on the PSP: PSPLink reset (LoadExec) took a bus error in sceGE_Manager reading 0x083FFFFC, the word before the lists at 0x08400000; and the living-room curtain was missing (A/B pending) */
+static int lists_volatile, lists_parked;
+volatile int p4_power_switch, p4_power_resumed;
+static void *lists_volatile_take(void)
+{
+    void *base = NULL;
+    int size = 0;
+    if (!p4_lists_volatile)
+        return NULL;
+    int r = sceKernelVolatileMemTryLock(0, &base, &size);
+    if (r < 0 || size < (int)(2 * LIST_WORDS * sizeof(unsigned))) {
+        if (r >= 0)
+            sceKernelVolatileMemUnlock(0);
+        p4_log("lists: volatile block not taken (%08x, %d bytes), heap\n", r, size);
+        return NULL;
+    }
+    int lock = scePowerLock(0);
+    lists_volatile = 1;
+    p4_log("lists: in the volatile block at %p (%d KB), power lock %08x\n", base, size / 1024, lock);
+    return base;
+}
+/* the GE must be idle and no list open */
+void p4_lists_park(void)
+{
+    if (!lists_volatile || lists_parked)
+        return;
+    int r = sceKernelVolatileMemUnlock(0);
+    scePowerUnlock(0);
+    lists_parked = 1;
+    p4_log("lists: volatile block given back (%08x)\n", r);
+}
+void p4_lists_unpark(void)
+{
+    if (!lists_parked)
+        return;
+    void *base = NULL;
+    int size = 0, r = -1;
+    for (int i = 0; i < 100 && (r = sceKernelVolatileMemTryLock(0, &base, &size)) < 0; i++)
+        sceKernelDelayThread(20000);
+    if (r >= 0 && base == (void *)list_store) {
+        scePowerLock(0);
+        lists_parked = 0;
+        p4_log("lists: volatile block taken again\n");
+        return;
+    }
+    if (r >= 0)
+        sceKernelVolatileMemUnlock(0);
+    void *heap = memalign(64, 2 * LIST_WORDS * sizeof(unsigned));
+    p4_log("lists: volatile block lost (%08x at %p), heap %p\n", r, base, heap);
+    if (heap) /* the next frame starts at list_store[pipe_set] (present set it before the park) */
+        list = (unsigned *)heap + (list - (unsigned *)list_store), list_store = heap;
+    lists_volatile = lists_parked = 0;
+}
 static int in_frame;
 /* Frameskip (b147). The game advances a fixed 1/30 s a frame (iGpffff8040 = 0x3D088889): at 15 FPS it ran at half
    speed. When the game falls behind real time by more than half a tick, the next frame runs its logic and draws
@@ -331,6 +391,37 @@ static unsigned gate_seq, texture_waits;
 static int gate_closed;
 int p4_list_double = 1; /* b400: on by the user's choice. b399: off. b364, see gate_poll. b398: on by the user's choice (PSP b396 Entrance with everything flat: CPU 47 -> 42 ms; one more frame of latency) */
 static int gate_at_present;
+/* b496 p4_shot: a screenshot for PSPLink without PSPLink's own scrshot, which builds its BMP at 0x88300000 over the
+   Media Engine's program (the next movie hung in sceMpegInit, the audio with it), and without a savemem of VRAM, which
+   froze the game. PSPLink's savemem only reads 0x08800000-0x09FFFFFF (and the kernel's 0x88000000-0x883FFFFF): the
+   heap (above 0x0A000000) and the volatile block (0x08400000) both gave empty files. b498: the frame goes as RGB565
+   (480x272x2 = 255 KB) into video.c's 256 KB low hole (0x094xxxxx), reserved and unused outside movies.
+   1 (poked): the next shown frame is copied; 2: ready at p4_shot_buf; 3 (poked): done, back to 0; 4: no hole (a movie). */
+volatile int p4_shot;
+void *volatile p4_shot_buf;
+void *p4_video_low_scratch(unsigned bytes);
+static void shot_poll(const void *fb)
+{
+    if (p4_shot == 3) {
+        p4_shot_buf = NULL, p4_shot = 0;
+        return;
+    }
+    if (p4_shot != 1)
+        return;
+    unsigned short *out = p4_video_low_scratch(480 * 272 * 2);
+    if (!out) {
+        p4_shot = 4;
+        return;
+    }
+    const unsigned *in = (const unsigned *)(0x44000000 + (unsigned)fb);
+    for (int y = 0; y < 272; y++)
+        for (int x = 0; x < 480; x++) {
+            unsigned c = in[y * STRIDE + x]; /* ABGR */
+            out[y * 480 + x] = (unsigned short)(((c >> 3) & 0x1f) << 11 | ((c >> 10) & 0x3f) << 5 | ((c >> 19) & 0x1f));
+        }
+    sceKernelDcacheWritebackRange(out, 480 * 272 * 2);
+    p4_shot_buf = out, p4_shot = 2;
+}
 extern int gu_object_stack_depth;
 static int flip_main(SceSize size, void *arg)
 {
@@ -342,7 +433,7 @@ static int flip_main(SceSize size, void *arg)
             sceDisplayWaitVblankStart();
             if (sceDisplaySetFrameBuf((void *)(0x04000000 + (unsigned)fb), STRIDE,
                                      PSP_DISPLAY_PIXEL_FORMAT_8888, PSP_DISPLAY_SETBUF_IMMEDIATE) >= 0)
-                fps_presented();
+                fps_presented(), shot_poll(fb);
             shown_seq = seq;
             if (p4_timeline)
                 tl_frame[seq & 7].shown = tl_now();
@@ -447,6 +538,12 @@ static void begin_frame(void);
    b413 PSP: f044 -> Heaven, 33.3 MB of 38 MB used, a 256 KB raster refused, the game stopped. */
 int p4_load_release = 1;
 static int load_release_pending;
+/* b503 p4_load_release_late: the same release once more this many drawn frames after the last field-pack load.
+   Dojima's living room, 4/17 morning (b500-b502): static lists recorded while the room was being set up held no
+   curtain, and nothing in their keys changed afterwards, so the curtain stayed missing; any later re-record (a
+   release, a key change) brought it back and kept it. 0: off. */
+int p4_load_release_late = 0; /* b510: off. b509 PSP: the curtain was there without it; it went missing only with b500's near drop, recorded into static lists during the room load */
+static unsigned load_release_late_at;
 static void load_release_check(void);
 static int frame_colour_pending, in_camera_clear; /* b379, im2d.h p4_keep_previous */
 static unsigned keep_previous_copies;
@@ -524,6 +621,8 @@ int p4_bone_direct = 1; /* 0: sceGuBoneMatrix for every slot of every batch, as 
 static unsigned bones_sent;
 static unsigned skin_ge_draws, skin_ge_batches, skin_ge_fallbacks, skin_ge_builds, skin_ge_bytes, skin_cpu_batches, skin_nonfinite_bones;
 static unsigned skin_build_us, skin_build_max_us, skin_build_max_v; /* b212: skin cache build time */
+int p4_skin_disk = 1; /* b514: see skin_disk.h */
+static unsigned skin_disk_hits, skin_disk_writes, skin_disk_misses, skin_disk_us;
 extern int p4_skin_strip;
 static unsigned strip_batches, strip_failed, strip_list_idx, strip_idx; /* b209 */
 float p4_skin_lod_depth = 0; /* b245, see skin_geometry; b254: 900 (b246 dialogue: 78 -> 67 ms). b308: off until rebuilt: the online
@@ -599,7 +698,15 @@ int p4_guard_compact = 1; /* 1 (b99): a guarded mesh uses its cached compact arr
 int p4_guard_gnear = 1; /* 1 (b103): the GE clips the near plane itself (PS2RC: "PPSSPP and the PSP agree"); the CPU
                           only cuts at the four band planes, which pass through the eye and so also cut everything
                           behind it. b101's near_ge sent corners behind the eye uncut: those leave the window. */
-#define GUARD_MASK (p4_guard_gnear ? 0x1eu : 0x1fu)
+/* b500 p4_guard_near_drop: a triangle with a corner in front of the near plane is dropped whole, as the PS2 does.
+   Dojima's living room, 4/17 morning: a cupboard right at the camera (w 42-128, near plane at w 100) crossed the near
+   plane; the GE clipped it there and drew the rest, a dark wedge beside the hero. The PS2 (PCSX2 state of the same
+   moment) shows nothing there. With it on, meshes and chunks reaching the near plane are classified per triangle
+   (the near bit joins the mask) and the crossing triangles never reach the GE. 0: the GE clips them, as before. */
+int p4_guard_near_drop = 0; /* b510: off. 2 (b508/509, two corners in front of the near plane: dropped) removed the 4/17 cupboard wedge and kept the curtain wall, but cut holes in the floor while walking (2262 drops per 256 frames). 1 (b500, any corner) made walls see-through. The PS2 rule is in its VU1 microcode: to be read. Also: a drop is view-dependent and must not go into a static list (the curtain missing after b500). */
+static unsigned guard_near_dropped, guard_near_hist[12];
+int p4_guard_near_ratio = 100; /* b506: see guard.h; 100 = b500 (any corner in front of the near plane) */
+#define GUARD_MASK (p4_guard_gnear && !p4_guard_near_drop ? 0x1eu : 0x1fu)
 static unsigned guard_offscreen;
 int p4_guard_boxes = 1; /* b109 room with the hash fixed: 50.0 ms without, 45.0 ms with (off-screen chunks no longer reach
                           the GE); same picture. 1 (b104): guarded meshes drawn from the mesh cache are classified by the boxes of runs of
@@ -703,7 +810,9 @@ int func_003fe700(void)
             p4_pipeline = 0;
     }
     if (!list_store) { /* b325 */
-        list_store = memalign(64, 2 * sizeof *list_store);
+        list_store = lists_volatile_take();
+        if (!list_store)
+            list_store = memalign(64, 2 * sizeof *list_store);
         if (!list_store) {
             p4_log("display list allocation failed\n");
             return 0;
@@ -928,7 +1037,16 @@ static void *scratch_alloc(unsigned n)
     void *p = p4a_memalign(64, n);
     return p ? p : memalign(64, n);
 }
+static unsigned swizzle_us, swizzle_n; /* b513: for hitch_check */
+static void hitch_check(void);
+static void swizzle_raster_body(Raster *r);
 static void swizzle_raster(Raster *r)
+{
+    unsigned t0 = sceKernelGetSystemTimeLow();
+    swizzle_raster_body(r);
+    swizzle_us += sceKernelGetSystemTimeLow() - t0, swizzle_n++;
+}
+static void swizzle_raster_body(Raster *r)
 {
     if (!p4_swizzle_textures || !r->originalPixels || swizzle_head(r->originalPixels))
         return;
@@ -1093,6 +1211,21 @@ static void rtt_bind_target(RttSlot *s)
     sceGuScissor(0, 0, target_w, target_h);
 }
 
+static int raster_rows_scratch; /* b519: func_003fd940 creates a native texture */
+/* b519: rows the swizzle did not replace (switch off, no memory) are the raster's for good: off the arena */
+static void raster_rows_home(Raster *r)
+{
+    if (!r->originalPixels || swizzle_head(r->originalPixels) || !p4_arena_owns(r->originalPixels))
+        return;
+    unsigned char *rows = memalign(64, r->stride * r->height);
+    if (!rows)
+        return; /* stays in the arena: still a valid block */
+    memcpy(rows, r->originalPixels, r->stride * r->height);
+    sceKernelDcacheWritebackRange(rows, r->stride * r->height);
+    p4a_free(r->originalPixels);
+    r->originalPixels = rows;
+}
+
 int func_003f98a0(void *out, Raster *r, int flags)
 {
     if (!p4r_003f7a70(out, r, flags)) {
@@ -1104,7 +1237,9 @@ int func_003f98a0(void *out, Raster *r, int flags)
     if ((r->cFlags & DONT_ALLOCATE) || (r->cType & TYPE_MASK) == TYPE_CAMERA || (r->cType & TYPE_MASK) == TYPE_ZBUFFER)
         return 1;
     r->stride = (r->width * r->depth + 7) / 8;
-    r->originalPixels = memalign(64, r->stride * r->height);
+    /* b519: a native texture's rows only live until swizzle_raster replaces them (func_003fd940): the arena first, so
+       the game's heap gets the swizzled block alone and no hole where the rows were */
+    r->originalPixels = raster_rows_scratch ? scratch_alloc(r->stride * r->height) : memalign(64, r->stride * r->height);
     if (r->originalPixels && r->depth <= 8)
         r->palette = memalign(64, 4 << r->depth);
     if (r->originalPixels && (r->depth > 8 || r->palette))
@@ -1336,8 +1471,34 @@ static void *pipe_last_end;
 static unsigned pipe_watchdog_gave_up;
 int p4_vsync_late = 1; /* 0: a frame slower than its vblank cap flips at once instead of waiting for the next vblank */
 /* rwSTANDARDRASTERSHOWRASTER */
+int p4_video_renderer_begin(void);
+void p4_video_renderer_end(void);
+static void lists_sleep_check(void)
+{
+    static int busy;
+    if (!p4_power_switch || busy)
+        return;
+    p4_power_switch = 0;
+    if (!lists_volatile || lists_parked)
+        return;
+    busy = 1;
+    p4_power_resumed = 0;
+    if (p4_video_renderer_begin() >= 0) { /* GE idle, the frame closed */
+        p4_lists_park();
+        unsigned t0 = sceKernelGetSystemTimeLow();
+        /* asleep, or no sleep within 3 s (a switch moved without a sleep): take the block back */
+        while (!p4_power_resumed && sceKernelGetSystemTimeLow() - t0 < 3000000)
+            sceKernelDelayThread(50000);
+        p4_log("lists: power switch, %s after %u ms\n", p4_power_resumed ? "resumed" : "no sleep",
+               (sceKernelGetSystemTimeLow() - t0) / 1000);
+        p4_lists_unpark();
+        p4_video_renderer_end();
+    }
+    busy = 0;
+}
 int func_003f79b0(void *raster, void *device, int flags)
 {
+    lists_sleep_check();
     translucent_flush();
     if (skip_frame && !in_frame) { /* a skipped frame: logic ran, nothing was drawn */
         skipped_frames++;
@@ -1452,9 +1613,13 @@ int func_003f79b0(void *raster, void *device, int flags)
     ge_us += after_sync - before_sync;
 #endif
     vertex_used = index_used = flat_taken = 0;
+    hitch_check(); /* b513 */
     cache_frame++;
     { extern volatile int p4_cache_flush_pending; extern unsigned p4_mesh_cache_release(void);
-      if (p4_cache_flush_pending) p4_cache_flush_pending = 0, p4_mesh_cache_release(), load_release_pending = p4_load_release; }
+      if (p4_cache_flush_pending) p4_cache_flush_pending = 0, p4_mesh_cache_release(), load_release_pending = p4_load_release,
+          load_release_late_at = p4_load_release_late ? cache_frame + p4_load_release_late : 0;
+      if (load_release_late_at && cache_frame == load_release_late_at)
+          load_release_late_at = 0, load_release_pending = 1, p4_log("load release late: %d frames after the load\n", p4_load_release_late); }
     ptank_spill_collect(0);
     feedback_captured = 0;
     /* The game advances a fixed 1/30 s a frame everywhere (PS2: 60 VPS, 30 FPS): never show more than one frame per two vblanks. */
@@ -1507,7 +1672,7 @@ int func_003f79b0(void *raster, void *device, int flags)
         if (present_new_frame &&
             sceDisplaySetFrameBuf((void *)(0x04000000 + (unsigned)draw_buffer), STRIDE,
                                   PSP_DISPLAY_PIXEL_FORMAT_8888, PSP_DISPLAY_SETBUF_IMMEDIATE) >= 0) {
-            fps_presented();
+            fps_presented(), shot_poll(draw_buffer);
             draw_buffer = other;
         }
         flip_seq = shown_seq = ge_queued;
@@ -1559,8 +1724,8 @@ int func_003f79b0(void *raster, void *device, int flags)
         if (p4_clut32 || clut32_made)
             p4_log("clut32 %d: binds %u made %u (%u ms in all) full %u stale %u\n", p4_clut32, clut32_binds, clut32_made, clut32_ms, clut32_full, clut32_stale), clut32_binds = 0;
         if (p4_swz_copy || swz_made)
-            p4_log("swz copy %d prescale %d: binds %u made %u prescaled %u\n", p4_swz_copy, p4_swz_prescale, swz_binds, swz_made,
-                   swz_prescaled), swz_binds = swz_made = swz_prescaled = 0;
+            p4_log("swz copy %d prescale %d: binds %u made %u prescaled %u (pack %u)\n", p4_swz_copy, p4_swz_prescale, swz_binds,
+                   swz_made, swz_prescaled, sprite_pack_hits), swz_binds = swz_made = swz_prescaled = sprite_pack_hits = 0;
         p4_log("hwperf n=%u ms=%u cpu_us=%u ge_wait_us=%u present_us=%u\n",
                samples, (after_present - window_start) / 1000,
                cpu_us / samples, ge_us / samples, vblank_us / samples);
@@ -1574,6 +1739,10 @@ int func_003f79b0(void *raster, void *device, int flags)
     present_end = after_present;
 #endif
     watch();
+    if (!(frames & 63)) { /* b520: take the heap reserve back once the heap has the run (main.c) */
+        extern void p4_heap_reserve_tick(void);
+        p4_heap_reserve_tick();
+    }
     if (!(++frames & 255)) {
         extern void p4_memstat_report(void);
         p4_memstat_report();
@@ -1581,7 +1750,7 @@ int func_003f79b0(void *raster, void *device, int flags)
         p4_log("frames %d atomics %d skipped %d ptanks %d/%d sectors %d skinned %d other %d tests %d out %d af48 %d\n", frames, atomics_drawn, atomics_skipped, ptanks_drawn, particles_drawn, sectors_drawn, skinned_drawn, pipeline_other, frustum_tests, frustum_out, G32(0xaf48 - 0x10000));
         p4_log("display list peak %u of %u words; draws refused for room %u\n", list_peak_words, (unsigned)LIST_WORDS, list_refused_draws);
         list_peak_words = list_refused_draws = 0;
-        p4_log("guard on %d meshes %d clipped %d dropped %d spheres %d vertices %d uvrebase %d uvmemo %d hits %u dstalpha_skipped %d\n", p4_guard_clip, guard_meshes, guard_clipped, guard_dropped, guard_spheres, guard_vertices, uv_rebased, p4_uv_memo, uv_memo_hits, dst_alpha_skipped);
+        p4_log("guard near_drop %d dropped %u; on %d meshes %d clipped %d dropped %d spheres %d vertices %d uvrebase %d uvmemo %d hits %u dstalpha_skipped %d\n", p4_guard_near_drop, guard_near_dropped, p4_guard_clip, guard_meshes, guard_clipped, guard_dropped, guard_spheres, guard_vertices, uv_rebased, p4_uv_memo, uv_memo_hits, dst_alpha_skipped);
         guard_big_report();
         if (guard_pool_recovered || guard_pool_exhausted) {
             p4_log("guard pool recovered %u exhausted %u\n", guard_pool_recovered, guard_pool_exhausted);
@@ -1648,6 +1817,9 @@ int func_003f79b0(void *raster, void *device, int flags)
         if (skin_ge_builds)
             p4_log("skin cache builds %u took %u us, longest %u us (%u vertices)\n", skin_ge_builds, skin_build_us, skin_build_max_us, skin_build_max_v);
         skin_build_us = skin_build_max_us = skin_build_max_v = 0;
+        if (skin_disk_hits || skin_disk_writes || skin_disk_misses) /* b514 */
+            p4_log("skin disk %d: read %u written %u not there %u, %u us\n", p4_skin_disk, skin_disk_hits, skin_disk_writes,
+                   skin_disk_misses, skin_disk_us), skin_disk_hits = skin_disk_writes = skin_disk_misses = skin_disk_us = 0;
         if (p4_skin_diff)
             p4_log("skin diff per 256 frames: checked %u differing %u\n", skin_diff_checked, skin_diff_count), skin_diff_checked = skin_diff_count = 0;
         p4_log("skin finite %d bones out %u per 256 frames\n", p4_skin_finite, skin_nonfinite_bones), skin_nonfinite_bones = 0;
@@ -1742,6 +1914,12 @@ int func_003f79b0(void *raster, void *device, int flags)
                guard_cut_edge[11], guard_cut_edge[12], guard_cut_edge[13], guard_cut_edge[14], guard_cut_edge[15]);
         memset(guard_cut_edge, 0, sizeof guard_cut_edge), guard_cut_near = guard_cut_side = guard_cut_both = 0;
         guard_census_report();
+        if (p4_guard_near_drop)
+            p4_log("guard near corners (behind eye, then tenths of near): %u %u %u %u %u %u %u %u %u %u %u %u ratio %d\n", guard_near_hist[0],
+                   guard_near_hist[1], guard_near_hist[2], guard_near_hist[3], guard_near_hist[4], guard_near_hist[5], guard_near_hist[6],
+                   guard_near_hist[7], guard_near_hist[8], guard_near_hist[9], guard_near_hist[10], guard_near_hist[11], p4_guard_near_ratio);
+        guard_near_dropped = 0;
+        memset(guard_near_hist, 0, sizeof guard_near_hist);
         guard_meshes = guard_clipped = guard_dropped = guard_spheres = guard_vertices = uv_rebased = dst_alpha_skipped = 0;
         { /* probe: what a battle action waits on */
             extern int btlSoundIsPlaybackActive(void);
@@ -2484,7 +2662,7 @@ static unsigned ge_time_end(int started, int category)
    Time cards already do in Im3D (b?): 1 culls with CCW as the front face, 2 with CW, 0 never culls (as before). The
    limousine floor patch (Velvet Room, 4-vertex lit untextured quad, normals down) is coplanar with the carpet: a back
    face from the camera, drawn over the carpet with culling off. */
-int p4_cull_back = 3; /* b382: 3 by default (Velvet Room PSP: the patch gone, CCW front); 1/2 cut holes in curtains and walls */
+int p4_cull_back = 3; /* b382: 3 by default (Velvet Room PSP: the patch gone, CCW front). b505 tried 1 again: the living-room window lost its white glare as on the PS2, but walls and curtains lost every other triangle (holes, sawtooth) in the 4/16 evening: back to 3 */
 static void bind_depth(void)
 {
     /* 3 and 4: only lit, untextured meshes without prelight (the f73 class of the limousine floor patch), CCW / CW */
@@ -2783,7 +2961,9 @@ void *func_003fd940(void *stream)
     int levels = G32(0xabf8 - 0x10000);
     G32(0xabf8 - 0x10000) = legacy ? 1 : (info.tex1[1] >> 2) + 1;
     G32(0xb8ac - 0x10000) = legacy;
+    raster_rows_scratch = 1; /* b519: rows and blob in the arena, see func_003f98a0 */
     Raster *r = p4r_003ec590(width, height, info.depth, info.format);
+    raster_rows_scratch = 0;
     G32(0xabf8 - 0x10000) = levels;
     G32(0xb8ac - 0x10000) = 0;
     if (!r)
@@ -2791,7 +2971,7 @@ void *func_003fd940(void *stream)
     unsigned char *blob = 0;
     if (find_struct(stream, &length) &&
         (!legacy || (length == info.pixelSize + info.paletteSize && r->palette)) &&
-        (blob = memalign(16, length)) && p4r_003e2910(stream, blob, length) == length) {
+        (blob = scratch_alloc(length)) && p4r_003e2910(stream, blob, length) == length) {
         if (legacy) {
             ps2_index8_reduce(r->originalPixels, r->stride, r->width, r->height, blob, info.width, info.height);
             memcpy(r->palette, blob + info.pixelSize, info.paletteSize);
@@ -2804,6 +2984,7 @@ void *func_003fd940(void *stream)
         if (r->palette)
             func_003fd520(0, r);
         swizzle_raster(r);
+        raster_rows_home(r);
         free(blob);
         return r;
     }
@@ -2812,9 +2993,19 @@ void *func_003fd940(void *stream)
     return 0;
 }
 
+unsigned p4_heap_usable(const void *mem); /* main.c b523 */
 void tmxDmaCopy(unsigned destination, unsigned source, unsigned bytes)
 {
     pipe_texture_wait();
+    /* b523 heap guard: a TMX copy past its raster's block would break the next block's header (main.c __wrap_free) */
+    unsigned room = p4_heap_usable((const void *)destination);
+    if (room && bytes > room) {
+        static unsigned told;
+        if (told++ < 16)
+            p4_log("HEAP GUARD tmx copy %u bytes into %x, its block holds %u: cut (from %x)\n", bytes, destination, room,
+                   (unsigned)__builtin_return_address(0));
+        bytes = room;
+    }
     clut32_written((const unsigned char *)destination, bytes); /* b375 */
     memcpy((void *)destination, (void *)source, bytes);
 }
@@ -3417,6 +3608,60 @@ void p4_matfx_report(void)
 
 #include "fx_direct.h"
 
+/* b511 diagnostic: geometries whose RenderWare bounding sphere does not hold all their vertices. The PS2 sends an
+   atomic whose sphere is wholly inside the view to its non-clipping VU code, which drops triangles crossing the near
+   plane; one whose sphere crosses a plane goes to the clipping code (vu1MicroMem.bin, 0x478-0x50d). A sphere that
+   lies would explain the 4/17 cupboard: inside by its sphere, crossing the near plane by its vertices. Logged: the
+   geometry once, and each 256th frame such an atomic is drawn with its sphere beyond the near plane and a vertex
+   in front of it. */
+static struct { const Geometry *g; float over; } sphere_lie_seen[64];
+static unsigned sphere_lie_n, sphere_lie_hits;
+static void sphere_lie_check(const Geometry *g, char *frame)
+{
+    if (!g || SKIN_OF_GEOMETRY(g) || !g->morphTarget || !g->morphTarget->verts || g->numVertices <= 0)
+        return;
+    const float *s = g->morphTarget->sphere;
+    int k = 0;
+    for (; k < (int)sphere_lie_n; k++)
+        if (sphere_lie_seen[k].g == g)
+            break;
+    if (k == (int)sphere_lie_n) {
+        if (sphere_lie_n >= 64)
+            return;
+        float worst = 0;
+        const V3 *v = g->morphTarget->verts;
+        for (int i = 0; i < g->numVertices; i++) {
+            float dx = v[i].x - s[0], dy = v[i].y - s[1], dz = v[i].z - s[2], d = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (d > worst)
+                worst = d;
+        }
+        sphere_lie_seen[k].g = g, sphere_lie_seen[k].over = s[3] > 0 ? worst / s[3] : 99;
+        sphere_lie_n++;
+        if (sphere_lie_seen[k].over > 1.02f)
+            p4_log("sphere lie: geometry %p v%d sphere %d %d %d r %d, farthest vertex %d%% of r\n", (const void *)g, g->numVertices,
+                   (int)s[0], (int)s[1], (int)s[2], (int)s[3], (int)(sphere_lie_seen[k].over * 100));
+    }
+    if (sphere_lie_seen[k].over <= 1.02f || !current_camera)
+        return;
+    const Matrix *m = p4r_003e9700(frame), *vw = (const Matrix *)((char *)current_camera + CAMERA_VIEW);
+    float near = *(float *)((char *)current_camera + CAMERA_NEAR);
+#define SL_Z(px, py, pz) ({ float wx = (px) * m->right.x + (py) * m->up.x + (pz) * m->at.x + m->pos.x,                                   wy = (px) * m->right.y + (py) * m->up.y + (pz) * m->at.y + m->pos.y,                                   wz = (px) * m->right.z + (py) * m->up.z + (pz) * m->at.z + m->pos.z;                             wx * vw->right.z + wy * vw->up.z + wz * vw->at.z + vw->pos.z; })
+    float scale = sqrtf(m->right.x * m->right.x + m->right.y * m->right.y + m->right.z * m->right.z);
+    float zc = SL_Z(s[0], s[1], s[2]);
+    if (zc - s[3] * scale <= near)
+        return; /* the sphere itself reaches the near plane: clipped on the PS2 too */
+    const V3 *v = g->morphTarget->verts;
+    float zmin = 1e30f;
+    for (int i = 0; i < g->numVertices; i++) {
+        float z = SL_Z(v[i].x, v[i].y, v[i].z);
+        if (z < zmin)
+            zmin = z;
+    }
+#undef SL_Z
+    if (zmin < near && !(sphere_lie_hits++ & 255))
+        p4_log("sphere lie drawn: geometry %p sphere beyond near (centre %d, r %d), nearest vertex %d, near %d\n", (const void *)g,
+               (int)zc, (int)(s[3] * scale), (int)zmin, (int)near);
+}
 static void *atomic_render_body(void *atomic)
 {
     if (!list_room()) /* b325: the frame list is nearly full */
@@ -3486,6 +3731,7 @@ static void *atomic_render_body(void *atomic)
         return atomic;
     }
     atomics_drawn++;
+    sphere_lie_check(g, frame); /* b511 diagnostic */
     if (rtt_target && (rtt_atomics & 255) <= 2) { /* b328: where a camera-texture atomic lands (clip x y w), its depth state */
         const Matrix *m = p4r_003e9700(frame);
         Mat4 vp;
@@ -4002,4 +4248,30 @@ void p4_video_renderer_end(void)
     feedback_captured = 0;
     texture_generation++, texture_epoch++;
     gu_dirty();
+}
+
+/* b513 p4_hitch_ms: a frame longer than this (wall clock, cache_frame to cache_frame) is logged with the preparation
+   it held: file reads (any thread), texture swizzles, mesh cache builds, skin builds, static list recording, CLUT8
+   copies, 2D copies. "rest" is the frame minus those: the game's own work (parsing what it read, scripts) and the
+   draw. What an offline pack could take off a load or a first appearance. 0: off. */
+int p4_hitch_ms = 50;
+static void hitch_check(void)
+{
+    extern unsigned p4_io_us, p4_io_bytes;
+    enum { IO_US, IO_B, TEX_US, TEX_N, MESH_N, SKIN_US, SKIN_N, SL_US, CLUT_MS, CLUT_N, SWZ_N, HN };
+    unsigned cur[HN] = { p4_io_us, p4_io_bytes, swizzle_us, swizzle_n, cache_builds, skin_build_us, skin_ge_builds,
+                         sl_record_us, clut32_ms, clut32_made, swz_made };
+    static unsigned prev[HN], last, total_ms, hitches;
+    unsigned d[HN], now = sceKernelGetSystemTimeLow(), ms = (now - last) / 1000;
+    for (int i = 0; i < HN; i++) /* counters reset by their reports: then the whole value is this frame's */
+        d[i] = cur[i] >= prev[i] ? cur[i] - prev[i] : cur[i], prev[i] = cur[i];
+    if (last && p4_hitch_ms && ms >= (unsigned)p4_hitch_ms) {
+        unsigned known = d[IO_US] / 1000 + d[TEX_US] / 1000 + d[SKIN_US] / 1000 + d[SL_US] / 1000 + d[CLUT_MS];
+        total_ms += ms, hitches++;
+        p4_log("hitch frame %u %u ms: io %u ms %u KB, tex %u ms x%u, mesh builds %u, skin %u ms x%u, slist %u ms, "
+               "clut32 %u ms x%u, swz x%u, rest %d ms (hitches %u, %u ms in all)\n", cache_frame, ms, d[IO_US] / 1000,
+               d[IO_B] / 1024, d[TEX_US] / 1000, d[TEX_N], d[MESH_N], d[SKIN_US] / 1000, d[SKIN_N], d[SL_US] / 1000,
+               d[CLUT_MS], d[CLUT_N], d[SWZ_N], (int)ms - (int)known, hitches, total_ms);
+    }
+    last = now;
 }

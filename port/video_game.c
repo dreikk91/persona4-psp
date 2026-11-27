@@ -99,6 +99,8 @@ int mwPlayerUpdate(unsigned char *owner)
     }
     p4_log("video task begin index %d %s\n", index, stem);
     if (p4_video_renderer_begin() < 0) { p4_log("video GE did not drain\n"); return -1; }
+    void p4_lists_park(void), p4_lists_unpark(void);
+    p4_lists_park(); /* b499: the frame lists give the volatile block to the decoder */
     void *display = NULL; int stride = 0, format = 0;
     sceDisplayGetFrameBuf(&display, &stride, &format, PSP_DISPLAY_SETBUF_IMMEDIATE);
     p4_video_on_frame = movie_frame;
@@ -146,6 +148,7 @@ int mwPlayerUpdate(unsigned char *owner)
     p4_video_on_frame = NULL; p4_video_buttons = NULL;
     if (display && stride > 0)
         sceDisplaySetFrameBuf(display, stride, format, PSP_DISPLAY_SETBUF_IMMEDIATE);
+    p4_lists_unpark();
     p4_video_renderer_end();
     p4_log("video task end %s result %d; returning to game\n", stem, result);
     return -1;

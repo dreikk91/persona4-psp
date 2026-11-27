@@ -32,13 +32,13 @@ def validate_elf(elf):
 BUILD_TOOLS = ('psp_census', 'psp_vu0', 'psp_data_census', 'psp_make_data',
                'psp_ptr_proof', 'psp_xref', 'psp_link', 'psp_link_census',
                'psp_reasm', 'psp_address_audit', 'psp_hw_debug', 'psp_build',
-               'psp_prepare', 'extract_elf', 'psp_strips', 'psp_clut', 'psp_static_pack', 'psp_meshopt', 'psp_disc')
+               'psp_prepare', 'extract_elf', 'psp_strips', 'psp_clut', 'psp_static_pack', 'psp_meshopt', 'psp_disc', 'psp_sprites', 'psp_icons')
 WORKER_SCRIPTS = {'psp_census.py', 'psp_ptr_proof.py', 'psp_link.py',
-                  'psp_make_data.py', 'psp_address_audit.py', 'psp_hw_debug.py', 'psp_strips.py', 'psp_clut.py', 'psp_static_pack.py'}
+                  'psp_make_data.py', 'psp_address_audit.py', 'psp_hw_debug.py', 'psp_strips.py', 'psp_clut.py', 'psp_static_pack.py', 'psp_sprites.py', 'psp_icons.py'}
 TOOLS = ('psp-gcc', 'psp-nm', 'psp-as', 'psp-ld', 'psp-objcopy', 'psp-objdump',
          'psp-size', 'psp-strip', 'psp-fixup-imports', 'psp-prxgen', 'mksfoex', 'pack-pbp')
 ARTIFACTS = {'EBOOT.PBP', 'p4.prx', 'p4.elf', 'p4data.bin', 'p4str.bin'}
-OPTIONAL_ARTIFACTS = {'p4strips.bin', 'p4clut.bin', 'p4static.bin'}
+OPTIONAL_ARTIFACTS = {'p4strips.bin', 'p4clut.bin', 'p4static.bin', 'p4sprite.bin'}
 # Hash of canonical paths and file contents, independent of ZIP packaging.
 UPSTREAM_TREE_SHA256 = 'b1a5681e7b30280b558c2deb438b2815b414eee4e6a59da55e551778ead45bc0'
 _cancelled = threading.Event()
@@ -265,7 +265,7 @@ def verify_upstream(archive, wanted):
 def payload_files(root):
     root = Path(root)
     files = list((root / 'port').glob('*.c')) + list((root / 'port').glob('*.h'))
-    files += list((root / 'port').glob('*.S')) + list((root / 'port/icons').glob('*.PNG'))
+    files += list((root / 'port').glob('*.S'))  # no game artwork: psp_icons.py makes the XMB images from the ISO
     files += [root / 'tools' / (name + '.py') for name in BUILD_TOOLS]
     return sorted(files)
 
@@ -276,7 +276,7 @@ def verify_payload(bundle, config):
         raise ValueError('Source package has no source manifest.')
     for name, wanted in expected.items():
         path = safe_relative(name)
-        if path.parts[0] not in ('port', 'tools') or path.suffix not in ('.c', '.h', '.S', '.py', '.PNG'):
+        if path.parts[0] not in ('port', 'tools') or path.suffix not in ('.c', '.h', '.S', '.py'):
             raise ValueError(f'Unexpected build input: {name}')
         source = Path(bundle) / 'source' / str(path)
         if not source.is_file() or digest(source) != wanted:
@@ -581,10 +581,12 @@ def _build_eboot(iso, bundle, pspdev=None, cache=None, archive=None):
             # psp_hw_debug puts it in the release next to the EBOOT.
             run_stage(workspace, 'psp_strips.py', ['--iso', iso, '--static'], env, log)
             run_stage(workspace, 'psp_clut.py', ['--iso', iso], env, log)
+            run_stage(workspace, 'psp_sprites.py', ['--iso', iso], env, log)  # b512: prescaled 2D images
             helper = bundle / 'helpers/p4meshopt.dll'
             if helper.is_file():
                 env['P4_MESHOPT'] = str(helper)
             run_stage(workspace, 'psp_static_pack.py', ['--iso', iso], env, log)
+            run_stage(workspace, 'psp_icons.py', ['--iso', iso], env, log)  # ICON0/PIC1 from the title screen
             run_stage(workspace, 'psp_hw_debug.py', ['--release', '--asset-packs', workspace / 'build/psp_dist/PSP/GAME/P4', '--out', release], env, log)
         manifest = validate_result(release, config['build'])
         record_verification(release, config, manifest, toolchain)

@@ -471,7 +471,10 @@ static int mesh_packed_strip(const unsigned short *in, int n, int prim, int vert
     free(list);
     return count;
 }
-static MeshCache mesh_cache[CACHE_SLOTS];
+#include "vu_place.h" /* b517: mesh_cache and lock_memo in the image's VU block */
+typedef MeshCache VuMeshCache[CACHE_SLOTS];
+_Static_assert(sizeof(VuMeshCache) <= VU_MESH_CACHE_SIZE, "vu_place.h: mesh_cache grew");
+#define mesh_cache VU_PLACE(VuMeshCache, VU_MESH_CACHE)
 static SceUID cache_thread = -1; /* the drawing thread (b273 p4_mesh_cache_release) */
 volatile int p4_cache_flush_pending; /* b276: set by files.c (the loader may not be the drawing thread) */
 int p4_cache_flush_on_load = 1; /* b275: release the cache when a field pack (.p00) starts loading (files.c); 0: as b274 */
@@ -481,7 +484,9 @@ int p4_material_state = 1; /* b177: 1: GE-lit cache keys without the material; 2
 int p4_cache_reuse_last = 1; /* 1: a miss may take its mesh's entry drawn last frame (pipeline off); 0: as b75 */
 /* draw_geometry: declared in guard.h (b387) */
 typedef struct { const Geometry *g; const void *pos, *uv, *pre, *nrm; int count; float du, dv; unsigned nsample, part[4]; } LockMemo;
-static LockMemo lock_memo[1024];
+typedef LockMemo VuLockMemo[1024];
+_Static_assert(sizeof(VuLockMemo) <= VU_LOCK_MEMO_SIZE, "vu_place.h: lock_memo grew");
+#define lock_memo VU_PLACE(VuLockMemo, VU_LOCK_MEMO)
 
 /* Why a mesh's cache entry stops matching: the first input whose running hash differs (pointers, positions, UVs,
    prelight, then count + UV shift, then lighting and normals), vertices weighted. Heap: .bss is full. */
@@ -762,19 +767,27 @@ static void probe_report(unsigned frames)
 int p4_mesh_compact = 1; /* 0: every mesh rebuilds the whole array, as b66 */
 static unsigned *mesh_lit, *mesh_stamp, mesh_generation;
 static unsigned short *mesh_remap;
+/* b522: sized to the largest mesh drawn so far (4K vertex steps), not MAX_GUARDED up front (320 KB of arena). A new
+   size takes three fresh blocks: stamps start at 0 and mesh_generation never is, and every caller asks here before it
+   touches them. A refused size leaves the old blocks: that mesh draws the plain way. */
+static int mesh_scratch_cap;
 static int mesh_scratch(int count)
 {
-    if (!mesh_lit) {
-        mesh_lit = malloc(MAX_GUARDED * sizeof *mesh_lit);
-        mesh_stamp = calloc(MAX_GUARDED, sizeof *mesh_stamp);
-        mesh_remap = malloc(MAX_GUARDED * sizeof *mesh_remap);
-        if (!mesh_lit || !mesh_stamp || !mesh_remap) {
-            p4_log("mesh scratch failed, compact meshes off\n");
-            p4_mesh_compact = 0;
-            return 0;
-        }
+    if (count > MAX_GUARDED)
+        return 0;
+    if (count <= mesh_scratch_cap)
+        return 1;
+    int cap = (count + 4095) & ~4095;
+    unsigned *lit = malloc(cap * sizeof *mesh_lit), *stamp = calloc(cap, sizeof *mesh_stamp);
+    unsigned short *remap = malloc(cap * sizeof *mesh_remap);
+    if (!lit || !stamp || !remap) {
+        free(lit), free(stamp), free(remap);
+        return 0;
     }
-    return count <= MAX_GUARDED;
+    free(mesh_lit), free(mesh_stamp), free(mesh_remap);
+    mesh_lit = lit, mesh_stamp = stamp, mesh_remap = remap, mesh_scratch_cap = cap;
+    p4_log("mesh scratch: %d vertices (%d KB)\n", cap, cap * 10 >> 10);
+    return 1;
 }
 
 #include "mesh_topology.h"
@@ -808,7 +821,8 @@ static void draw_meshes_body(MeshHeader *header, const V3 *position, float (*uv)
 typedef struct { unsigned h[2], start, words, draws, used; } GeCall;
 int p4_skin_call = 1; /* 0: every skinned batch's state and draw built every frame, as b188 */
 int p4_mesh_call = 1; /* 0: every mesh cache hit's state and draw built every frame, as b189 */
-enum { CALL_RING_WORDS = 256 * 1024, CALL_FRAME_WORDS = CALL_RING_WORDS / 8, CALL_MAX_WORDS = 512 };
+/* b521: 1 MB -> 256 KB (arena). Margaret/battle: records and misses as before, refreshes 110 -> 595 a route, never full */
+enum { CALL_RING_WORDS = 64 * 1024, CALL_FRAME_WORDS = CALL_RING_WORDS / 8, CALL_MAX_WORDS = 512 };
 enum { CALL_GS_WORDS = (sizeof gs + 3) / 4, CALL_HEAD = CALL_GS_WORDS + 4 };
 static unsigned *call_ring, call_head, call_frame, call_frame_words;
 static unsigned call_hits[2], call_records[2], call_misses[2], call_refreshes, call_refused, call_full; /* [0] skin, [1] mesh */

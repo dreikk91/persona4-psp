@@ -158,6 +158,8 @@ void __libpthreadglue_init(void)
     pthread_init();
 }
 unsigned p4_video_low_hole(void) { return low_hole_at; }
+/* b498: the reserved hole as scratch (rwsky.c p4_shot) while it is held, i.e. outside movies; NULL when too small */
+void *p4_video_low_scratch(unsigned bytes) { return low_hole >= 0 && bytes <= LOW_HOLE ? (void *)low_hole_at : NULL; }
 static unsigned mpeg_library_at(void)
 {
     SceUID ids[64];

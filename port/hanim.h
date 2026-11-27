@@ -1706,7 +1706,8 @@ int p4_hanim_dispatch(unsigned *h, int (*original)(void *))
         return 1;
     hanim_calls++;
     if (p4_hanim_check && !(hanim_calls & 7) && !(h[0] & 2) && (int)h[1] > 0 && (int)h[1] <= 256) {
-        static Matrix saved[256];
+        _Static_assert(256 * sizeof(Matrix) <= VU_HANIM_SAVED_SIZE, "vu_place.h: saved grew");
+        Matrix *saved = &VU_PLACE(Matrix, VU_HANIM_SAVED); /* b517: 256 of them, in the image's VU block */
         int n = (int)h[1];
         p4r_00397c40(h); /* the retail update, not original: that is func_00397c40, which may take the C path now */
         memcpy(saved, (void *)h[2], n * sizeof(Matrix));

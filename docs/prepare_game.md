@@ -4,18 +4,33 @@
 
 The current utility builds **EBOOT.PBP on your PC**, then prepares resources from your Persona 4 USA or supported USA UNDUB (`SLUS-21782`) ISO. New preparation packages contain our port sources and conversion tools. They contain **no prebuilt game EBOOT, compiled game objects, retail executable, rebased game data or build-specific numerical data recipe**. The pinned upstream decompilation is fetched separately.
 
-The older prebuilt-EBOOT b164 download has been withdrawn. The current source-build package is published as **P4-PSP-b495-windows-x64.zip** in the [b495 pre-release](https://github.com/dreikk91/persona4-psp/releases/tag/b495); creating a package locally does not publish it.
+The older prebuilt-EBOOT b164 download has been withdrawn. The current source-build package is published as **P4-PSP-b524-windows-x64.zip** in the [b524 pre-release](https://github.com/dreikk91/persona4-psp/releases/tag/b524); creating a package locally does not publish it.
 
 1. Extract the complete new utility archive to a PC folder. Keep `Prepare P4.exe`, `_internal`, `helpers`, `source`, `prepare.json` and any included `toolchain` folder together.
 2. Run **Prepare P4.exe** and select your USA or supported USA UNDUB ISO and an output folder outside the utility folder.
 3. Click **Build and prepare**. The utility downloads the PSP compiler on the first build (about 100 MB, verified by SHA256, kept in the build cache), verifies the disc, obtains the pinned upstream sources, compiles the game and port, checks the linked image, packages EBOOT and prepares all audio/movies.
 4. Wait for **Ready**, then copy the resulting **P4** folder to **PSP/GAME/** on your memory card. Start the game from XMB.
 
+**Updates.** From b524 on, `Prepare P4.exe` checks the project's GitHub releases when it opens. When a newer build exists it asks before downloading; the package is checked against the release's `SHA256SUMS.txt`, unpacked next to the current utility folder and opened. Each package carries its own conversion scripts and sources, so tools added in a new release come with it. Your ISO, output folder and build cache are not touched; delete the old utility folder when you no longer need it. Without Internet access the check is skipped silently.
+
 No separate Python, Git, FFmpeg, PSPLink or PSPDEV installation is required by the frozen source-build Windows utility. The compiler and PSPSDK come from the [toolchain release](https://github.com/dreikk91/persona4-psp/releases/tag/toolchain-gcc15.2): a Windows x64 build of the official pspdev GCC 15.2.0 / binutils 2.44 branches, published with its corresponding source. A package that has `toolchain/pspdev` uses that instead; see [the toolchain notes](building.md). Developer packages without the frozen EXE still need a compatible PSPDEV installation.
 
 The first source download requires Internet access. Later builds can reuse the SHA256-verified archive. The revision is pinned to `363eab8a966d60a9773b45f330f2344329ec4f0a`. An independently obtained ZIP with the expected SHA256 can be supplied through `--upstream-archive` for offline use (this also works when opening the GUI from a command line). Read the upstream license/provenance notices before redistributing material.
 
 Use a local PC disk for preparation and build caching. Reserve at least the ISO size plus 4 GiB for resources, plus space for source/compiler workspaces. Preparation decodes over 17,000 streams and converts all 23 movies. The original ISO is read only. The supported USA UNDUB executable has SHA-1 `e4b3fac598b1d85906d53389dd38baf9b7375ea1`; the original USA executable is `4eeec0360cf2715535d9f7e52eb69d786fb0158c`. Other regions, unknown modified executables and compressed images are not supported. Japanese voices and movies come from the selected ISO; do not mix resource folders from different editions. A homebrew-capable PSP with 64 MB RAM is required; PSP-1000 support is not established.
+
+## PSP menu icon and background
+
+The package contains no game artwork. By default the utility makes the XMB images from your ISO's title screen: the icon is the P4 logo over the school corridor, the background is the corridor, darkened so the white game title stays readable.
+
+To use your own pictures, choose them in **Icon 144x80** and **Background 480x272** before **Build and prepare** (from the command line: `--icon0 <file>` and `--pic1 <file>`). Leave a field empty to keep the image made from the game. Either one can be set alone.
+
+| Field | XMB slot | Best size | Shown as |
+|---|---|---|---|
+| Icon | ICON0 | 144 x 80 px | the game's tile in the Game list; transparent PNG works |
+| Background | PIC1 | 480 x 272 px | the full screen behind the list while the game is selected; keep it dark, the title is drawn over it in white |
+
+PNG, JPG, BMP and WEBP are accepted. A picture of another size is scaled to fill the slot and its edges are trimmed evenly; `prepare.log` says how much was trimmed. The same shape at a larger size (for example 288 x 160 or 960 x 544) loses nothing. Your pictures go into the installed `P4/EBOOT.PBP` only: the compiled build in the cache stays as it is, so changing them later and running the same ISO/output folder again does not recompile the game.
 
 ## Build EBOOT only
 

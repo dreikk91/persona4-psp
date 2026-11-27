@@ -22,9 +22,49 @@ static Clut32 *clut32_slots; /* heap: .bss must end below the data image */
 static unsigned clut32_binds, clut32_made, clut32_full, clut32_stale, clut32_ms;
 
 typedef struct { unsigned hash, check, w, h, offset; } ClutPackEntry;
-static ClutPackEntry *clut_pack_index;
-static unsigned clut_pack_count, clut_pack_start;
-static int clut_pack_tried;
+/* an offline pack: P4CL (p4clut.bin) or P4SP (p4sprite.bin, tools/psp_sprites.py); header magic, version, count, data
+   offset, then count sorted ClutPackEntry rows */
+typedef struct { const char *file; unsigned magic, version; ClutPackEntry *index; unsigned count, start; int tried; } OfflinePack;
+static OfflinePack clut_pack = { "p4clut.bin", 0x4c433450, 2 };
+static void pack_open(OfflinePack *k)
+{
+    if (k->tried)
+        return;
+    k->tried = 1;
+    unsigned head[4];
+    SceUID fd = sceIoOpen(p4_path(k->file), PSP_O_RDONLY, 0);
+    if (fd >= 0) {
+        if (sceIoRead(fd, head, sizeof head) == sizeof head && head[0] == k->magic && head[1] == k->version &&
+            head[2] <= 65536 && head[3] == 16 + head[2] * sizeof(ClutPackEntry)) {
+            int bytes = head[2] * sizeof(ClutPackEntry);
+            k->index = p4a_malloc(bytes);
+            if (k->index && sceIoRead(fd, k->index, bytes) == bytes)
+                k->count = head[2], k->start = head[3];
+            else
+                p4a_free(k->index), k->index = 0;
+        }
+        sceIoClose(fd);
+    }
+    p4_log("%s: %u entries\n", k->file, k->count);
+}
+/* the entry of (hash, check, w, h), 0 if none */
+static const ClutPackEntry *pack_find(const OfflinePack *k, unsigned hash, unsigned check, int w, int h)
+{
+    unsigned lo = 0, hi = k->count;
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        if (k->index[mid].hash < hash)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    for (; lo < k->count && k->index[lo].hash == hash; lo++) {
+        const ClutPackEntry *e = k->index + lo;
+        if (e->check == check && e->w == (unsigned)w && e->h == (unsigned)h && e->offset >= k->start && e->offset <= 0x7ff00000u)
+            return e;
+    }
+    return 0;
+}
 
 static void clut32_install(const Raster *r, Clut32 *slot, int depth, unsigned char *indices, unsigned char *palette)
 {
@@ -44,25 +84,8 @@ static void clut32_install(const Raster *r, Clut32 *slot, int depth, unsigned ch
 
 static int clut_pack_read(const Raster *r, const unsigned char *rows, Clut32 *slot)
 {
-    if (!clut_pack_tried) {
-        clut_pack_tried = 1;
-        unsigned head[4];
-        SceUID fd = sceIoOpen(p4_path("p4clut.bin"), PSP_O_RDONLY, 0);
-        if (fd >= 0) {
-            if (sceIoRead(fd, head, sizeof head) == sizeof head && head[0] == 0x4c433450 && head[1] == 2 &&
-                head[2] <= 65536 && head[3] == 16 + head[2] * sizeof(ClutPackEntry)) {
-                int bytes = head[2] * sizeof(ClutPackEntry);
-                clut_pack_index = p4a_malloc(bytes);
-                if (clut_pack_index && sceIoRead(fd, clut_pack_index, bytes) == bytes)
-                    clut_pack_count = head[2], clut_pack_start = head[3];
-                else
-                    p4a_free(clut_pack_index), clut_pack_index = 0;
-            }
-            sceIoClose(fd);
-        }
-        p4_log("clut pack: %u entries\n", clut_pack_count);
-    }
-    if (!clut_pack_count)
+    pack_open(&clut_pack);
+    if (!clut_pack.count)
         return 0;
     unsigned hash = 2166136261u, check = 5381;
     for (int y = 0; y < r->height; y++)
@@ -71,19 +94,9 @@ static int clut_pack_read(const Raster *r, const unsigned char *rows, Clut32 *sl
             hash = (hash ^ byte) * 16777619u;
             check = (check * 33) ^ byte;
         }
-    unsigned lo = 0, hi = clut_pack_count;
-    while (lo < hi) {
-        unsigned mid = lo + (hi - lo) / 2;
-        if (clut_pack_index[mid].hash < hash)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    for (; lo < clut_pack_count && clut_pack_index[lo].hash == hash; lo++) {
-        const ClutPackEntry *e = clut_pack_index + lo;
-        if (e->check != check || e->w != r->width || e->h != r->height || e->offset < clut_pack_start || e->offset > 0x7ff00000u)
-            continue;
-        SceUID fd = sceIoOpen(p4_path("p4clut.bin"), PSP_O_RDONLY, 0);
+    const ClutPackEntry *e = pack_find(&clut_pack, hash, check, r->width, r->height);
+    if (e) {
+        SceUID fd = sceIoOpen(p4_path(clut_pack.file), PSP_O_RDONLY, 0);
         if (fd < 0)
             return 0;
         unsigned depth = 0;
@@ -542,6 +555,45 @@ static Raster *swz_install(Clut32 *slot, Raster *r, unsigned char *indices, int 
     swz_made++;
     return &slot->copy;
 }
+/* b512 p4_sprite_pack: the prescaled image made offline (tools/psp_sprites.py -> p4sprite.bin: Lanczos-3, whole-palette
+   match), keyed by the raster's indices and its unlocked palette. Read into indices (r's stride) at pw x ph; 0 when the
+   pack has no such image, then the job below makes it as before. */
+int p4_sprite_pack = 1;
+static OfflinePack sprite_pack = { "p4sprite.bin", 0x50533450, 1 };
+static unsigned sprite_pack_hits;
+static int sprite_pack_read(const Raster *r, unsigned char *indices, int pw, int ph)
+{
+    pack_open(&sprite_pack);
+    const unsigned *words = (const unsigned *)r->originalPixels, *pal = (const unsigned *)r->palette;
+    if (!sprite_pack.count || r->stride != r->width || ((unsigned)words & 3))
+        return 0;
+    /* the indices only: a bustup fades in by its palette's alpha, so the first bind sees a palette between states
+       (b512: Margaret missed with the palette in the key). ponytail: an image recoloured by palette alone shares its
+       entry, the match made for the disc's palette; key the palette too if one ever shows wrong colours. */
+    unsigned hash = 2166136261u, check = 5381;
+    for (int i = 0, n = r->width * r->height / 4; i < n; i++) {
+        hash = (hash ^ words[i]) * 16777619u;
+        check = (check * 33) ^ words[i];
+    }
+    const ClutPackEntry *e = pack_find(&sprite_pack, hash, check, r->width, r->height);
+    if (!e) {
+        p4_log("sprite pack miss %dx%d hash %08x pal0 %08x\n", r->width, r->height, hash, pal[0]);
+        return 0;
+    }
+    SceUID fd = sceIoOpen(p4_path(sprite_pack.file), PSP_O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+    unsigned short size[2] = { 0, 0 };
+    int ok = sceIoLseek32(fd, e->offset, PSP_SEEK_SET) == (int)e->offset && sceIoRead(fd, size, 4) == 4 &&
+             size[0] == pw && size[1] == ph && sceIoRead(fd, indices, pw * ph) == pw * ph;
+    sceIoClose(fd);
+    if (!ok)
+        return 0;
+    for (int y = ph - 1; y > 0; y--) /* packed rows spread to the stride, last first: no row is overwritten unread */
+        memmove(indices + y * r->stride, indices + y * pw, pw);
+    sprite_pack_hits++;
+    return 1;
+}
 static Raster *swz_find(Raster *r)
 {
     if (r->width < 64 || r->height < 8 || r->width > 512 || r->height > 512 || !r->originalPixels || swizzle_head(r->originalPixels))
@@ -586,6 +638,10 @@ static Raster *swz_find(Raster *r)
     if (p4_swz_prescale && r->depth == 8 && r->palette && r->width >= p4_swz_prescale_min && r->height >= p4_swz_prescale_min) {
         int pw = (r->width * 3 + 3) / 4, ph = (r->height * 17 + 27) / 28; /* 480/640, 272/448 */
         swz_prescaled++;
+        if (p4_sprite_pack && sprite_pack_read(r, indices, pw, ph)) {
+            swz_edges(r, indices, pw, ph);
+            return swz_install(free_slot, r, indices, pw, ph, 0, 0, 0);
+        }
         if ((free_slot->job = swz_job_new(r, indices, pw, ph)))
             return r; /* made over the next frames */
         for (int y = 0; y < ph; y++) /* no memory for the filter: nearest texel */

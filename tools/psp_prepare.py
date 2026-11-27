@@ -187,7 +187,7 @@ def bundle_ffmpeg(bundle, cache=None):
 
 
 def prepare(iso, output, bundle=BUNDLE, workers=min(16, os.cpu_count() or 4), *, pspdev=None, build_cache=None,
-            upstream_archive=None, build_only=False):
+            upstream_archive=None, build_only=False, icon0=None, pic1=None):
     from psp_audio import available_rows, build_encoder, catalogue, convert as convert_audio, copy_banks, pack_audio
     from psp_video import convert as convert_video, movies
 
@@ -213,6 +213,13 @@ def prepare(iso, output, bundle=BUNDLE, workers=min(16, os.cpu_count() or 4), *,
         for helper in (Path(ffmpeg), vgmstream):
             if not helper.is_file():
                 raise FileNotFoundError(f'Missing release helper: {helper}')
+    # b525: the player's own XMB pictures (psp_icons.py), checked before the long work starts
+    custom_images = {}
+    for slot, picture in (('ICON0', icon0), ('PIC1', pic1)):
+        if picture:
+            from psp_icons import user_image
+            custom_images[slot], note = user_image(picture, slot)
+            print(f'{slot}: your picture {picture}' + (f' ({note})' if note else ''), flush=True)
     if not 1 <= workers <= 16:
         raise ValueError('Choose between 1 and 16 audio workers.')
     output.mkdir(parents=True, exist_ok=True)
@@ -261,8 +268,17 @@ def prepare(iso, output, bundle=BUNDLE, workers=min(16, os.cpu_count() or 4), *,
                           strings_sha256=hashes['p4str.bin'])
             eboot = built / 'EBOOT.PBP'
             data, strings = (built / 'p4data.bin').read_bytes(), (built / 'p4str.bin').read_bytes()
-            extras = {name: (built / name, hashes[name]) for name in ('p4strips.bin', 'p4clut.bin', 'p4static.bin') if name in hashes}
+            extras = {name: (built / name, hashes[name]) for name in ('p4strips.bin', 'p4clut.bin', 'p4static.bin', 'p4sprite.bin') if name in hashes}
         identity = {'iso_sha256': iso_digest, 'eboot_sha256': recipe['eboot_sha256']}
+        # the EBOOT installed: the built one, or a copy with the player's pictures (the output folder stays bound to
+        # the built one, so changing pictures later reuses it)
+        installed_eboot = recipe['eboot_sha256']
+        if custom_images:
+            from psp_icons import repack_pbp
+            work.mkdir(exist_ok=True)
+            pictured = work / 'EBOOT.PBP'
+            pictured.write_bytes(repack_pbp(Path(eboot).read_bytes(), custom_images))
+            eboot, installed_eboot = pictured, sha256(pictured)
         if source_build:
             identity['source_config_sha256'] = source_identity
         state = previous if previous is not None else dict(identity, files={})
@@ -283,7 +299,7 @@ def prepare(iso, output, bundle=BUNDLE, workers=min(16, os.cpu_count() or 4), *,
             for name, (path, _) in extras.items():
                 shutil.copyfile(path, destination / name)
             hashes = {name: sha256(destination / name) for name in ('EBOOT.PBP', 'p4data.bin', 'p4str.bin', *extras)}
-            for name, expected in (('EBOOT.PBP', recipe['eboot_sha256']), ('p4data.bin', recipe['data_sha256']),
+            for name, expected in (('EBOOT.PBP', installed_eboot), ('p4data.bin', recipe['data_sha256']),
                                    ('p4str.bin', recipe['strings_sha256']), *((n, d) for n, (_, d) in extras.items())):
                 if hashes[name] != expected:
                     raise ValueError('Launch file verification failed: ' + name)
@@ -333,7 +349,7 @@ def prepare(iso, output, bundle=BUNDLE, workers=min(16, os.cpu_count() or 4), *,
         shutil.copyfile(eboot, destination / 'EBOOT.PBP')
         for name, (path, _) in extras.items():
             shutil.copyfile(path, destination / name)
-        files.update({'p4data.bin': recipe['data_sha256'], 'p4str.bin': recipe['strings_sha256'], 'EBOOT.PBP': recipe['eboot_sha256']})
+        files.update({'p4data.bin': recipe['data_sha256'], 'p4str.bin': recipe['strings_sha256'], 'EBOOT.PBP': installed_eboot})
         files.update({name: digest for name, (_, digest) in extras.items()})
         for name, digest in files.items():
             if sha256(destination / name) != digest:
@@ -370,24 +386,30 @@ def gui(bundle, *, pspdev=None, build_cache=None, upstream_archive=None, build_o
     from tkinter import filedialog, messagebox, ttk
     window = tk.Tk()
     window.title('Persona 4 — Prepare for PSP')
-    window.geometry('820x700')
+    window.geometry('820x790')
     frame = ttk.Frame(window, padding=18); frame.pack(fill='both', expand=True)
     ttk.Label(frame, text='Prepare Persona 4 for your PSP', font=('Segoe UI', 16)).pack(anchor='w')
     ttk.Label(frame, text='Choose your Persona 4 USA / supported UNDUB ISO and an output folder.').pack(anchor='w', pady=(8, 16))
     iso, output = tk.StringVar(), tk.StringVar(value=str(Path.home() / 'Persona4-PSP'))
     only_build = tk.BooleanVar(value=build_only)
     selectors = []
+    icon0, pic1 = tk.StringVar(), tk.StringVar()
+    pictures = [('Pictures', '*.png *.jpg *.jpeg *.bmp *.webp'), ('All files', '*.*')]
     for label, variable, browse in [
         ('Game ISO', iso, lambda: filedialog.askopenfilename(filetypes=[('ISO image', '*.iso')])),
-        ('Output folder', output, filedialog.askdirectory)]:
+        ('Output folder', output, filedialog.askdirectory),
+        ('Icon 144x80', icon0, lambda: filedialog.askopenfilename(filetypes=pictures)),
+        ('Background 480x272', pic1, lambda: filedialog.askopenfilename(filetypes=pictures))]:
         row = ttk.Frame(frame); row.pack(fill='x', pady=4)
-        ttk.Label(row, text=label, width=14).pack(side='left')
+        ttk.Label(row, text=label, width=20).pack(side='left')
         entry = ttk.Entry(row, textvariable=variable); entry.pack(side='left', fill='x', expand=True)
         def choose(var=variable, callback=browse):
             selected = callback()
             if selected: var.set(selected)
         button = ttk.Button(row, text='Browse…', command=choose); button.pack(side='left', padx=(8, 0))
         selectors.extend([entry, button])
+    from psp_icons import GUIDE
+    ttk.Label(frame, text=GUIDE, wraplength=750, foreground='#555').pack(anchor='w', pady=(0, 8))
     ttk.Label(frame, text='The compiler and game sources are downloaded automatically on the first build.',
               wraplength=750).pack(anchor='w')
     mode_button = ttk.Checkbutton(frame, text='Build EBOOT only (skip game archive, audio and movie preparation)',
@@ -401,8 +423,13 @@ def gui(bundle, *, pspdev=None, build_cache=None, upstream_archive=None, build_o
 
     def start():
         source, target, launch_only = iso.get(), output.get(), only_build.get()
+        icon, background = icon0.get().strip() or None, pic1.get().strip() or None
         if not Path(source).is_file() or not target.strip():
             messagebox.showerror('Choose files', 'Select an existing ISO and an output folder.'); return
+        for name, picture in (('icon', icon), ('background', background)):
+            if picture and not Path(picture).is_file():
+                messagebox.showerror('Choose files', f'The {name} picture does not exist:\n{picture}\n\n'
+                                     'Clear the field to use the images from the game.'); return
         running[0] = True
         for widget in selectors + [start_button]: widget.configure(state='disabled')
         progress.start(); status.set('Preparing… This can take a while. Keep this window open.')
@@ -416,7 +443,7 @@ def gui(bundle, *, pspdev=None, build_cache=None, upstream_archive=None, build_o
                         try:
                             prepare(source, target, bundle, pspdev=pspdev,
                                     build_cache=build_cache, upstream_archive=upstream_archive,
-                                    build_only=launch_only)
+                                    build_only=launch_only, icon0=icon, pic1=background)
                         except Exception:
                             traceback.print_exc(); raise
                 messages.put(('built' if launch_only else 'done', str(Path(target) / 'P4')))
@@ -458,9 +485,43 @@ def gui(bundle, *, pspdev=None, build_cache=None, upstream_archive=None, build_o
         else:
             messagebox.showwarning(title, message + '\n\n' + detail)
 
+    def look_for_update():
+        try:
+            from psp_update import check
+            found = check(json.loads((Path(bundle) / 'prepare.json').read_text())['build'])
+            if found: messages.put(('update', found))
+        except Exception:
+            pass  # offline or rate-limited: keep using this package
+
+    def update(found):
+        if running[0] or not messagebox.askyesno('New version available',
+                f"Build b{found['build']} is available (this package is b{json.loads((Path(bundle) / 'prepare.json').read_text())['build']}).\n\n"
+                f"Download it now? It is unpacked next to this folder and opened; "
+                f"your ISO, output folder and build cache are not touched.\n\n{found['page']}"):
+            return
+        running[0] = True
+        for widget in selectors + [start_button]: widget.configure(state='disabled')
+        progress.start()
+
+        def worker():
+            try:
+                from psp_update import install
+                messages.put(('updated', str(install(found, bundle, lambda line: messages.put(('update-status', line))))))
+            except Exception as error:
+                messages.put(('error', f'Update failed: {error}'))
+        threading.Thread(target=worker, daemon=True).start()
+
     def poll():
         while not messages.empty():
             value = messages.get()
+            if isinstance(value, tuple) and value[0] == 'update':
+                update(value[1]); continue
+            if isinstance(value, tuple) and value[0] == 'update-status':
+                status.set(value[1]); continue
+            if isinstance(value, tuple) and value[0] == 'updated':
+                import subprocess
+                subprocess.Popen([value[1]], cwd=str(Path(value[1]).parent))
+                running[0] = False; window.destroy(); return
             if isinstance(value, tuple):
                 running[0] = False; progress.stop()
                 for widget in selectors + [start_button]: widget.configure(state='normal')
@@ -489,6 +550,8 @@ def gui(bundle, *, pspdev=None, build_cache=None, upstream_archive=None, build_o
             cancel_build()
         window.destroy()
     window.protocol('WM_DELETE_WINDOW', close)
+    if getattr(sys, 'frozen', False):  # source checkouts update with git
+        threading.Thread(target=look_for_update, daemon=True).start()
     poll(); window.mainloop()
     # Terminate the daemon worker when closing the frozen desktop process.
     if running[0]: os._exit(0)
@@ -505,6 +568,8 @@ def main():
     parser.add_argument('--build-cache', type=Path, help='Local compiler workspace/cache directory')
     parser.add_argument('--upstream-archive', type=Path, help='Pinned upstream ZIP for offline builds')
     parser.add_argument('--build-only', action='store_true', help='Build/install launch files without converting game resources')
+    parser.add_argument('--icon0', type=Path, help='Your XMB icon picture, best 144x80 (default: made from the ISO title screen)')
+    parser.add_argument('--pic1', type=Path, help='Your XMB background picture, best 480x272 (default: made from the ISO title screen)')
     cache_actions = parser.add_mutually_exclusive_group()
     cache_actions.add_argument('--cache-info', action='store_true', help='Report build-cache disk usage')
     cache_actions.add_argument('--clean-cache', action='store_true', help='Remove cached compiler workspaces and game objects')
@@ -577,7 +642,7 @@ def main():
                 try:
                     prepare(args.iso, args.output, args.bundle, args.workers, pspdev=args.pspdev,
                             build_cache=args.build_cache, upstream_archive=args.upstream_archive,
-                            build_only=args.build_only)
+                            build_only=args.build_only, icon0=args.icon0, pic1=args.pic1)
                 except Exception:
                     traceback.print_exc()
                     raise SystemExit(1)

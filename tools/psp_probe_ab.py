@@ -175,28 +175,47 @@ def main():
                                  for k in ('frame_ms','fps','cpu_ms','ge_wait_ms','present_ms')}
             print(json.dumps(result['average']), flush=True)
         if args.shot:
-            # PSPLink scrshot can deadlock AVC playback on real hardware.
-            # Check the latest boot's task log immediately before requesting it.
-            latest = log.read_text(errors='replace').rsplit('PRX image=', 1)[-1]
-            movie_events = re.findall(r'video task (begin|end)\b', latest)
-            if movie_events and movie_events[-1] == 'begin':
-                raise RuntimeError('Movie playback is active; PSPLink scrshot can hang the AVC decoder')
-            destination = Path(f'C:/temp/p3f-psplink/b{build_number}') / (args.label + '.bmp')
-            if destination.exists():
+            # 2026-11-25: never PSPLink `scrshot` (its BMP lands at 0x88300000, over the Media Engine's program: the next
+            # movie hung in sceMpegInit and the audio with it) and never `savemem` of VRAM (the game froze). b496+: the
+            # game copies the next shown frame (480x272 8888) to a RAM buffer on request (rwsky.c p4_shot).
+            if 'p4_shot' not in symbols:
+                raise SystemExit('--shot needs b498+ (p4_shot); PSPLink scrshot corrupts the Media Engine program')
+            frame = 480 * 272 * 2  # RGB565 (b498+), in video.c's low hole: savemem reads only 0x08800000-0x09FFFFFF
+            destination = Path(f'C:/temp/p3f-psplink/b{build_number}') / (args.label + '.raw')
+            if destination.exists() or destination.with_suffix('.png').exists():
                 raise FileExistsError(destination)
-            send([f'scrshot host0:/b{build_number}/{args.label}.bmp'])
-            until = time.monotonic() + 20
+            flag, buffer = symbols['p4_shot'], symbols['p4_shot_buf']
+            flush = [f'echo DBG_FLUSH_SHOT_{i}_........................................' for i in range(40)]
+            send([f'pokew 0x{flag:08x} 0x00000001', 'dcache w'] + flush)
+            address = None
+            until = time.monotonic() + 30
+            while time.monotonic() < until and address is None:
+                mark = log.stat().st_size
+                send([f'peekw 0x{flag:08x}', f'peekw 0x{buffer:08x}'] + flush)
+                time.sleep(2)
+                text = tail(mark)
+                state = re.search(rf'0x{flag:08X}: 0x([0-9A-F]{{8}})', text, re.I)
+                at = re.search(rf'0x{buffer:08X}: 0x([0-9A-F]{{8}})', text, re.I)
+                if state and int(state.group(1), 16) == 4:
+                    raise RuntimeError('No scratch hole (a movie is playing?): no screenshot')
+                if state and at and int(state.group(1), 16) == 2:
+                    address = int(at.group(1), 16)
+            if address is None:
+                raise TimeoutError('The game did not copy a frame (is it drawing?)')
+            send([f'savemem 0x{address:08x} 0x{frame:x} host0:/b{build_number}/{args.label}.raw'] + flush)
+            until = time.monotonic() + 60
             while time.monotonic() < until:
-                if destination.exists():
-                    data = destination.read_bytes()
-                    if len(data) >= 6 and len(data) == struct.unpack_from('<I', data, 2)[0]:
-                        from PIL import Image
-                        Image.open(destination).save(destination.with_suffix('.png'))
-                        result['screenshot'] = str(destination.with_suffix('.png'))
-                        break
+                if destination.exists() and destination.stat().st_size == frame:
+                    time.sleep(0.5)
+                    from PIL import Image
+                    image = Image.frombuffer('RGB', (480, 272), destination.read_bytes(), 'raw', 'BGR;16', 0, 1)
+                    image.save(destination.with_suffix('.png'))
+                    result['screenshot'] = str(destination.with_suffix('.png'))
+                    break
                 time.sleep(0.5)
             else:
                 raise TimeoutError('Screenshot did not complete')
+            send([f'pokew 0x{flag:08x} 0x00000003', 'dcache w'] + flush)
     except BaseException as error:
         result['error'] = str(error)
         raise

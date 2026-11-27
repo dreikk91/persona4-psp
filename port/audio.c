@@ -50,7 +50,14 @@ typedef struct { int active, owner, bank, group, timbre; unsigned pitch, volume,
 
 static SceSasCore sas __attribute__((aligned(64)));
 static short output[2][GRAIN*2] __attribute__((aligned(64)));
+#include "vu_place.h"
+#ifdef P4_K /* b517: in the image's VU block (vu_place.h) */
+typedef Stream VuStreams[STREAMS];
+_Static_assert(sizeof(VuStreams) <= VU_STREAMS_SIZE, "vu_place.h: streams grew");
+#define streams VU_PLACE(VuStreams, VU_STREAMS)
+#else
 static Stream streams[STREAMS];
+#endif
 static volatile int requested[STREAMS];
 static unsigned char input[CHUNK_BLOCKS*16*2] __attribute__((aligned(64)));
 static Index *index_rows;

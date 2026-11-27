@@ -414,6 +414,7 @@ static void gw_zstd(const void *p, unsigned n)
     }
 }
 
+static void gd_screenshot(const char *dump_path, unsigned display);
 static void gd_write(unsigned display)
 {
     char path[200];
@@ -460,6 +461,47 @@ static void gd_write(unsigned display)
     free(gw.buf);
     p4_log("GE dump %s: %s, %u commands, %u KB data, %u prims, %u textures, display %x\n", path,
            gw.error || at != gd.bufsz ? "WRITE FAILED" : "ok", gd.ncmds, gd.bufsz >> 10, gd.prims, gd.textures, display);
+    gd_screenshot(path, display);
+}
+
+/* b502: the frame the dump records, as ge_NNNN.bmp next to it (480x272, 24-bit, bottom-up rows): the picture the
+   PSP showed, to compare with a replay or a PS2 capture without a PSPLink screenshot. The GE is idle here. */
+static void gd_screenshot(const char *dump_path, unsigned display)
+{
+    char path[200];
+    snprintf(path, sizeof path, "%s", dump_path);
+    char *dot = strrchr(path, '.');
+    if (!dot)
+        return;
+    strcpy(dot, ".bmp");
+    unsigned char *row = malloc(480 * 3);
+    SceUID fd = row ? sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777) : -1;
+    if (fd < 0) {
+        p4_log("GE dump: cannot write %s (%x)\n", path, fd);
+        free(row);
+        return;
+    }
+    unsigned char h[54] = {'B', 'M'};
+    unsigned v;
+    v = 54 + 480 * 272 * 3, memcpy(h + 2, &v, 4);
+    v = 54, memcpy(h + 10, &v, 4);
+    v = 40, memcpy(h + 14, &v, 4);
+    v = 480, memcpy(h + 18, &v, 4);
+    v = 272, memcpy(h + 22, &v, 4);
+    h[26] = 1, h[28] = 24;
+    v = 480 * 272 * 3, memcpy(h + 34, &v, 4);
+    int ok = sceIoWrite(fd, h, 54) == 54;
+    const unsigned *fb = (const unsigned *)(0x44000000 + display);
+    for (int y = 271; y >= 0 && ok; y--) {
+        for (int x = 0; x < 480; x++) {
+            unsigned c = fb[y * STRIDE + x]; /* ABGR */
+            row[x * 3] = c >> 16, row[x * 3 + 1] = c >> 8, row[x * 3 + 2] = c;
+        }
+        ok = sceIoWrite(fd, row, 480 * 3) == 480 * 3;
+    }
+    sceIoClose(fd);
+    free(row);
+    p4_log("GE dump screenshot %s: %s\n", path, ok ? "ok" : "WRITE FAILED");
 }
 
 static void gd_free(void)

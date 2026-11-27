@@ -256,3 +256,48 @@ mpegbase` inside `sceMpegInit`; the library's address was not logged in that bui
 
 b426 = main with the b1402 change (fps overlay and build number left out). Next: field 63 or Junes -> title on b426,
 check `mpeg library at` (below 0x0A000000) and `mpeg init 00000000`.
+
+## b495 on the PSP (2026-11-25): the same hang, now with the watchdog
+
+PSPLink build of b495 (HEAD 677b765), user playing from a 4/11 save through 4/14 PM_C. The attract movie
+P4CTOP1 at boot played (result 0). About 15 minutes of play later, the 4/14 movie P4CT004 (TV fall): acknowledged
+pause (state 5, 37393 blocks, errors 1), SASCORE and AVCODEC unloads 0, `audio suspended`, video AVCODEC and
+MPEGBASE loads 0, MPEG library at 09438a00 (the same address as at boot), then no `mpeg init`. The watchdog
+logged `p4video stalled` after 4 s and the game went on (the user saw a green screen, then the next event). The
+audio restart then stalled too, so `p4_audio_dead` / `p4_video_dead` stay set: no music or voices for the rest
+of the session (user confirmed).
+
+Live thread state, read-only over PSPLink:
+
+- `p4video` WAITING on event flag `SceMediaEngineRpcWait` (039D9723) inside `sceMpegInit`: the same wait as b250.
+- `p4audio_restart` WAITING on the SceKernelModmgr event flag: its module load is queued behind
+  `SceKernelModmgrWorker`, which waits for the end of thread `SceModmgrStart`.
+- `SceModmgrStart` (a module_start of the reloaded SASCORE/AVCODEC) WAITING on the mutex `SceMediaEngineRpc`
+  (039DB91F), held by the `sceMpegInit` call that never gets its reply.
+
+So the audio loss is a consequence: every Media Engine user blocks behind the one RPC the ME never answers.
+Getting sound back needs the ME itself to answer again (a reset and reboot of the ME from kernel mode,
+or avoiding the wedge), not anything in the audio code.
+
+### Cause found: PSPLink `scrshot` overwrites the Media Engine program
+
+uofw's me_wrapper: the ME runs its firmware program from main RAM at 0x88300000-0x883FFFFF (decompressed
+there by the ME at boot, stack top 0x88400000; the "old ME partition"). A read-only `savemem 0x88300000 0x100000`
+of the wedged b495 game started with `BM` + size 0x0005FA36 = 391734 bytes: a 480x272 24-bit BMP. Every 32-bit word
+of the first 391734 bytes equals the last PSPLink screenshot (`stripes_nofog.bmp`), word for word. PSPLink's
+`scrshot` builds its BMP in that region. The code above it (0x88360000 on) is intact, which is why SAS (already
+running) kept working while the first AVC RPC (`sceMpegInit`) never got an answer: the AVC part of the ME program
+was a picture. Today's session took the first screenshot at 17:32, before P4CT004.
+
+Consequences:
+- Every ME hang seen under PSPLink after a `scrshot` (b169-b250, the title-return tests, today) is suspect: the
+  screenshot, not SAS or the game, can explain them. The "AVC decoder hang during scrshot" warning was a special
+  case of this.
+- It does not explain anything on a release EBOOT without PSPLink.
+- Rule: no PSPLink `scrshot` in a session that will play a movie later. Take screenshots from VRAM instead
+  (`savemem` of the displayed frame buffer), or restart the game before a movie test.
+- Reading 0xBFC00000 (`savemem`) or the 0xBC1000xx system registers (`peekw`) over PSPLink hung PSPLink and the game
+  (2026-11-25 18:04, usbhost "extralen 4096, ret -7"). Do not.
+- A VRAM read instead (`savemem 0x44088000 0x88000`, the shown buffer) failed at once with the same usbhost
+  "extralen 65536, ret -7" and the game froze with a stripe on screen (2026-11-25 18:09). `psp_probe_ab.py --shot` is
+  disabled until the game copies the shown frame into RAM itself.

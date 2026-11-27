@@ -1,6 +1,6 @@
 # Publishing the project
 
-The source repository is [dreikk91/persona4-psp](https://github.com/dreikk91/persona4-psp). Original port source, build tools and documentation are published from a separate source snapshot with fresh Git history. Local game artifacts and external checkouts are excluded from that snapshot. The older Windows preparation release asset was withdrawn; the current source-build utility is published as the b495 pre-release.
+The source repository is [dreikk91/persona4-psp](https://github.com/dreikk91/persona4-psp). Original port source, build tools and documentation are published from a separate source snapshot with fresh Git history. Local game artifacts and external checkouts are excluded from that snapshot. The older Windows preparation release asset was withdrawn; the current source-build utility is published as the b524 pre-release.
 
 For updates, clone the existing public repository with `gh repo clone dreikk91/persona4-psp`, copy only the reviewed source/documentation changes into that clone, and commit and push from there. Preserve the public history; do not push the development checkout's history. Uploading a Windows utility to Releases is a separate operation from pushing source changes.
 

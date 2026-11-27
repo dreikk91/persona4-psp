@@ -729,7 +729,16 @@ static int strip_take(int t, const StripEdge *edges, const int *range, const uns
    start search (the reference for p4_strip_check); else (b213) per-triangle counts of unused neighbours in buckets
    0..3 give the same choice (fewest, then the lowest triangle number) without rescanning every triangle per strip:
    b212 on the PSP, 10 characters' strips 6.7-7.9 s. */
+static int skin_stripify_body(const unsigned short *list, int corners, unsigned short *out, int slow);
+static unsigned stripify_us, wsplit_us; /* b513: what a skin build spends on strips and weight groups (SKINC) */
 static int skin_stripify(const unsigned short *list, int corners, unsigned short *out, int slow)
+{
+    unsigned t0 = sceKernelGetSystemTimeLow();
+    int r = skin_stripify_body(list, corners, out, slow);
+    stripify_us += sceKernelGetSystemTimeLow() - t0;
+    return r;
+}
+static int skin_stripify_body(const unsigned short *list, int corners, unsigned short *out, int slow)
 {
     int n = corners / 3, m = 0, len = 0;
     StripEdge *edges = malloc(n * 3 * sizeof *edges);
@@ -1256,6 +1265,23 @@ static int skin_batch(SkinGeometry *e, int mesh, const unsigned char *palette, i
         }
         b->rigid += rigid;
     }
+    /* b513: the weight groups first. When they replace the batch (p4_skin_drop_original) its own strip is never drawn:
+       b512 built it anyway, and a strip-pack hit read a 64 KB window from the memory stick for it, ~10 ms a batch,
+       45-75% of a character's build (SKINT). */
+    int ws = 0, dropped = 0;
+    if (p4_skin_wsplit || p4_skin_nocolour || p4_skin_flat) {
+        unsigned ws_t0 = sceKernelGetSystemTimeLow();
+        ws = skin_wsplit(e, b);
+        wsplit_us += sceKernelGetSystemTimeLow() - ws_t0;
+        dropped = b->grp && p4_skin_drop_original;
+    }
+    if (dropped) { /* b398: the GE draws only the groups; the original goes */
+        free(b->v), free(b->src);
+        b->v = 0, b->idx = b->src = 0;
+        skin_dropped_bytes += bytes;
+        e->bytes += ws, skin_ge_bytes += ws;
+        return 1;
+    }
     if (p4_skin_strip && corners >= 6) {
         int cap = 6 * (corners / 3) + 6, n = 0, ns = 0;
         unsigned short *strip = malloc(cap * sizeof *strip), *lens = 0;
@@ -1306,16 +1332,7 @@ static int skin_batch(SkinGeometry *e, int mesh, const unsigned char *palette, i
             free(strip), free(lens);
     }
     sceKernelDcacheWritebackRange(v, bytes - b->strip_count * (int)sizeof *b->strip);
-    if (p4_skin_wsplit || p4_skin_nocolour || p4_skin_flat) {
-        int ws = skin_wsplit(e, b);
-        if (b->grp && p4_skin_drop_original) { /* b398: the GE draws only the groups; the original goes */
-            free(b->v), free(b->src), free(b->strip), free(b->strip_lens);
-            b->v = 0, b->idx = b->src = b->strip = b->strip_lens = 0, b->strip_count = b->strip_n = 0;
-            skin_dropped_bytes += bytes;
-            bytes = ws;
-        } else
-            bytes += ws;
-    }
+    bytes += ws;
     e->bytes += bytes;
     skin_ge_bytes += bytes;
     return 1;
@@ -1548,6 +1565,7 @@ static unsigned char *skin_far_map(const Geometry *g, const Skin *skin, int nbon
         free(map), map = 0;
     return map;
 }
+#include "skin_disk.h"
 static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbones, int lit, int nrm)
 {
     if (!skin_cache && !(skin_cache = calloc(SKIN_GEOMETRIES, sizeof *skin_cache)))
@@ -1583,8 +1601,17 @@ static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbon
     e->nrm = nrm;
     e->sample = sample;
     e->frame = cache_frame;
+    unsigned disk_key[2];
+    int disk = skin_disk_usable(); /* b514: built on this PSP before: read back */
+    if (disk) {
+        skin_disk_key(g, skin, nbones, lit, nrm, sample, disk_key);
+        if (skin_disk_read(e, disk_key, nbones))
+            return e;
+        skin_free(e), e->g = g, e->verts = verts, e->vertices = g->numVertices, e->lit = lit, e->nrm = nrm, e->sample = sample, e->frame = cache_frame;
+    }
     skin_ge_builds++;
     unsigned build_t0 = sceKernelGetSystemTimeLow(); /* b212: what a build costs (a hitch when a character appears) */
+    unsigned strip_t0 = stripify_us, wsplit_t0 = wsplit_us, pack_t0 = pack_us, batch_us = 0;
     unsigned char *far_map = skin_bones_now > 0 ? skin_far_map(g, skin, nbones) : 0;
     vertex_bone_map = far_map; /* every vertex_bones below sees the kept bones only */
     skin_far_builds += far_map != 0;
@@ -1657,6 +1684,7 @@ static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbon
             }
         }
     }
+    unsigned phase_prep = sceKernelGetSystemTimeLow() - build_t0; /* b513: before the meshes (box, radius, trace) */
     MeshHeader *header = g->mesh;
     Mesh *mesh = (Mesh *)((char *)header + sizeof(MeshHeader) + header->firstMeshOffset);
     int strip = (header->flags & MESH_PRIM_MASK) == MESH_TRISTRIP, ok = 1;
@@ -1856,8 +1884,10 @@ static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbon
                 }
                 memcpy(palette, sorted, bones);
             }
+            unsigned batch_t0 = sceKernelGetSystemTimeLow();
             if (corners && !skin_batch(e, m, palette, bones > 0 ? bones : 1, tri, corners, g, skin, nbones))
                 ok = 0;
+            batch_us += sceKernelGetSystemTimeLow() - batch_t0;
             memcpy(held, palette, bones);
             skin_regrouped += regroup;
         }
@@ -1914,6 +1944,11 @@ static SkinGeometry *skin_geometry(const Geometry *g, const Skin *skin, int nbon
         p4_log("SKINC key %08x v %d meshes %d skin_bones %d nodes %d nbones %d lit %d nrm %d far %d simp %d batches %d bytes %u us %u\n",
                mk_key_g, g->numVertices, header->numMeshes, skin->numBones, hierarchy_nodes_seen, nbones, lit, nrm, skin_bones_now,
                skin_simplify_now, e->batches, e->bytes, build_us);
+    if (p4_skin_census) /* b513: where the build's time went */
+        p4_log("SKINT key %08x us %u prep %u batch %u strips %u wsplit %u pack %u\n", mk_key_g, build_us, phase_prep, batch_us,
+               stripify_us - strip_t0, wsplit_us - wsplit_t0, pack_us - pack_t0);
+    if (disk && ok)
+        skin_disk_write(e, disk_key); /* b514 */
     return e->batches ? e : 0; /* a failed build stays as an empty entry: the CPU path, without retrying every frame */
 }
 
